@@ -68,10 +68,18 @@ class TestExplicitPaths(InputsTestCase):
 
     def test_dedup_is_exact_string_identity(self):
         a = self.file("a.log")
-        # Same file referenced twice via distinct spellings: both are kept
-        # (no case folding, no symlink/inode identity - documented policy).
-        upper = discover_inputs([str(a), str(a).upper()])
-        self.assertEqual(len(upper.files), 2)
+
+        # Two distinct valid path strings referencing the same file.
+        nested = self.tmp / "nested"
+        nested.mkdir()
+        alternate_spelling = nested / ".." / a.name
+
+        self.assertNotEqual(str(a), str(alternate_spelling))
+        self.assertTrue(alternate_spelling.is_file())
+
+        result = discover_inputs([str(a), str(alternate_spelling)])
+
+        self.assertEqual(len(result.files), 2)
 
 
 class TestDirectoryDiscovery(InputsTestCase):
