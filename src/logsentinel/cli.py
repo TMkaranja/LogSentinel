@@ -62,6 +62,7 @@ from .inputs import discover_inputs
 from .parsers import stream_parse_file
 from .report import (
     RunStatistics,
+    _sanitize,
     render_console,
     render_json,
     write_report,
@@ -140,13 +141,20 @@ def _cli_overrides(args: argparse.Namespace) -> dict[str, object]:
 
 
 def _strict_abort(entry: ErrorEntry) -> Exception:
-    """Build the strict-mode abort exception for an error entry (FR-152)."""
+    """Build the strict-mode abort exception for an error entry (FR-152).
+
+    The reason is sanitized before the message is composed: parser
+    exception reasons can embed raw log-line tokens (e.g. invalid-IP
+    diagnostics echo the offending token), and this message reaches
+    stderr in strict mode. Reuses the report layer's single redaction
+    implementation - no second, inconsistent sanitizer.
+    """
     exception_type = _EXCEPTION_BY_KIND.get(entry.kind, InputPathError)
     location = f"in {entry.source_file}"
     if entry.line_number is not None:
         location += f" at line {entry.line_number}"
     return exception_type(
-        f"strict mode abort: {entry.reason} ({location}, "
+        f"strict mode abort: {_sanitize(entry.reason)} ({location}, "
         f"kind={entry.kind!r})")
 
 

@@ -440,6 +440,23 @@ class TestErrorHandling(CliTestCase):
         self.assertIn("bad.log", err)
         self.assertIn("line 1", err)
 
+    def test_strict_abort_reason_sanitized_on_stderr(self):
+        """Regression (security audit R2): parser exception reasons can
+        embed raw log-line tokens (an invalid IP echoes the offending
+        token), and the strict-mode abort message reaches stderr.
+        The abort reason must be sanitized before that happens.
+        """
+        bad = self.write(
+            "secret.log",
+            "Mar 10 11:20:01 h sshd[1001]: Failed password for admin "
+            "from password=hunter2 port 22 ssh2\n")
+        code, _, err = self.run_cli([str(bad), "--strict"])
+        self.assertEqual(code, 2)  # strict abort behaviour unchanged
+        self.assertIn("strict mode abort", err)
+        self.assertIn("<REDACTED>", err)   # marker present
+        self.assertNotIn("hunter2", err)   # secret value absent
+        self.assertIn("secret.log", err)   # diagnostic context preserved
+
     def test_strict_abort_exception_mapping(self):
         cases = {
             "config": ConfigError,
