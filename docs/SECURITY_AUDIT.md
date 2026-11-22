@@ -30,7 +30,7 @@ detection rule `LS-RULE-002` (port-scan detection).
 | **R1** | Sensitive raw lines in temporary SQLite staging | *Historical (resolved for the identified path):* raw log lines — which could contain credentials — were once stored verbatim in the temporary SQLite staging database during processing, leaving plaintext secrets on disk for the run's duration. Commit `37d19de` (M1) replaced this with sanitized evidence lines and per-run keyed HMAC fingerprints; the database now contains no raw-line column or raw-line index. | **RESOLVED for the identified path** (residual risks remain — see §4) |
 | **R2** | Strict-mode stderr leakage | Strict-mode abort messages could expose sensitive tokens embedded in parser diagnostic reasons (e.g. invalid-IP validation errors echo the offending token from the log line). The message is now sanitized before being returned and printed. | **RESOLVED for the identified path** (see §3) |
 | **R3** | Unexpected exception output | The unexpected-failure diagnostic (exit code 3) prints the exception text to stderr; that text is not sanitized and could expose sensitive information in arbitrary failure cases. | **OPEN** |
-| **R4** | Source-path redaction | `source_file` values are length-capped in reports but are not comprehensively redacted; a credential-shaped path name could survive into the report (truncated). | **OPEN** |
+| **R4** | Source-path redaction | Source paths appeared in externally visible error outputs (JSON error entries length-capped but not redacted; strict-mode abort diagnostics echoed the full uncapped path); a credential-shaped path name or OS username could survive into the output. Output paths are now replaced with the neutral marker `[REDACTED_PATH]`. | **RESOLVED for externally visible outputs** (source paths remain internally and in temporary storage — see §4) |
 | **R5** | Redaction bypass limitations | The existing redaction is best-effort: it matches credential-shaped key/value pairs and Authorization headers only. It cannot guarantee detection of every secret format or encoding (bare tokens, unrecognized key names, separator variations, multi-line secrets, non-percent encodings). This is a documented design limitation, not a defect introduced by the R2 fix. | **OPEN** |
 
 No findings beyond R1–R5 are recorded here, and the open findings have not been
@@ -126,8 +126,22 @@ fixed.
   (short diagnostics for exit code 3). A failure whose exception text contains
   log-derived content could expose it. Bounding or sanitizing this output
   changes the FR-153 diagnostic contract and requires authorization.
-- **R4 (OPEN):** source paths are truncated but not redacted; a path containing
-  credential-shaped text can appear (truncated) in reports.
+- **R4 (RESOLVED for externally visible outputs):** source paths are replaced
+  with the neutral marker `[REDACTED_PATH]` in JSON report error entries and in
+  strict-mode abort diagnostics (line number and kind preserved — they are not
+  path information). Console reports never rendered paths. The marker is
+  defined once in the leaf event module (`events.py`) and applied at both output
+  boundaries (`report.py::_error_to_json`, `cli.py::_strict_abort`); internal
+  source-path association (storage, staging, event association, reconstruction)
+  is unchanged, and the caller's `ErrorEntry` object is not mutated. Regression
+  tests assert that Windows and POSIX absolute paths — including usernames,
+  directory structure and credential-shaped filenames — never appear in the JSON
+  report, that strict-abort messages no longer name the file, and that internal
+  association still works (tests would fail under the previous capping-only
+  implementation). **Distinction:** this remediates *output* redaction only —
+  source paths are still retained internally, staged in the temporary SQLite
+  database, and (as with any temporary file) can survive abnormal termination;
+  at-rest source-path exposure is not eliminated.
 - **R5 (OPEN):** best-effort redaction misses unkeyed secrets, unknown key
   vocabularies, unusual separators, multi-line secrets, and non-percent
   encodings. Closing R5 fully is a significant design change; the current
@@ -142,9 +156,10 @@ fixed.
   The length cap is a backstop, not a security boundary: a 256-character
   evidence cap does not ensure that secrets cannot leak.
 - **FR-162 and NFR-009 must not be described as fully satisfied** while the
-  documented gaps (R3, R4, R5, and R1's residual risks) remain unresolved. The accurate public
+  documented gaps (R3, R5, and R1's residual risks) remain unresolved. The accurate public
   position — already stated in docs/USAGE.md §8.4 and docs/ARCHITECTURE.md §5 —
   is that redaction is best-effort and users should not feed secret-bearing
   logs to tools they do not trust.
 - Findings R3, R4, and R5 remain open for future remediation decisions;
-  R1 is resolved for its identified path with documented residual risks.
+  R1 and R2 are resolved for their identified paths with documented residuals.
+  (R4's residual: at-rest source-path exposure in temporary storage.)

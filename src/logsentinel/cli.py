@@ -62,6 +62,7 @@ from .inputs import discover_inputs
 from .parsers import stream_parse_file
 from .report import (
     RunStatistics,
+    _REDACTED_PATH,
     _sanitize,
     render_console,
     render_json,
@@ -150,7 +151,10 @@ def _strict_abort(entry: ErrorEntry) -> Exception:
     implementation - no second, inconsistent sanitizer.
     """
     exception_type = _EXCEPTION_BY_KIND.get(entry.kind, InputPathError)
-    location = f"in {entry.source_file}"
+    # R4: the strict-abort diagnostic is externally visible (stderr), so the
+    # source path is replaced with the neutral marker; the line number and
+    # kind are not path information and are preserved.
+    location = f"in {_REDACTED_PATH}"
     if entry.line_number is not None:
         location += f" at line {entry.line_number}"
     return exception_type(

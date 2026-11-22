@@ -235,14 +235,44 @@ class TestRedactionAndCapping(unittest.TestCase):
         self.assertIn("<REDACTED>", reason)
         self.assertNotIn("abc123", reason)
 
-    def test_source_path_capped(self):
-        entry = ErrorEntry(source_file="p" * 400, line_number=1,
-                           reason="bad", kind="input")
+    def test_source_path_redacted_in_json(self):
+        """R4 regression (would fail under the previous capping-only
+        implementation, which echoed the truncated path): externally
+        visible error entries replace the source path with the neutral
+        marker - absolute directories, usernames, directory structure and
+        filenames never reach the JSON report.
+        """
+        # Windows absolute path with a username and sensitive directory.
+        win = ErrorEntry(
+            source_file=r"C:\Users\alice\secret\creds.log",
+            line_number=1, reason="bad", kind="input")
         payload = json.loads(
             render_json([finding()], stats(), AppConfig(), GENERATED_AT,
-                        errors=[entry]))
-        self.assertLessEqual(len(payload["errors"][0]["source_file"]), 300)
-        self.assertTrue(payload["errors"][0]["source_file"].startswith("p"))
+                        errors=[win]))
+        self.assertEqual(payload["errors"][0]["source_file"],
+                         "[REDACTED_PATH]")
+        for fragment in ("alice", "C:\\", "Users", "secret", "creds.log"):
+            self.assertNotIn(fragment, json.dumps(payload))
+        # POSIX absolute path, likewise.
+        posix = ErrorEntry(source_file="/home/bob/.ssh/id_rsa.log",
+                           line_number=2, reason="bad", kind="input")
+        payload = json.loads(
+            render_json([finding()], stats(), AppConfig(), GENERATED_AT,
+                        errors=[posix]))
+        self.assertEqual(payload["errors"][0]["source_file"],
+                         "[REDACTED_PATH]")
+        self.assertNotIn("bob", json.dumps(payload))
+        self.assertNotIn("id_rsa", json.dumps(payload))
+        # The internal entry keeps its path for association/processing.
+        self.assertEqual(win.source_file, r"C:\Users\alice\secret\creds.log")
+        self.assertEqual(posix.source_file, "/home/bob/.ssh/id_rsa.log")
+        # The marker is consistent across entries.
+        payload = json.loads(
+            render_json([finding()], stats(), AppConfig(), GENERATED_AT,
+                        errors=[win, posix]))
+        self.assertEqual(
+            [e["source_file"] for e in payload["errors"]],
+            ["[REDACTED_PATH]", "[REDACTED_PATH]"])
 
 
 class TestErrorOverflow(unittest.TestCase):

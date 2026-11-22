@@ -49,6 +49,8 @@ __all__ = [
 MAX_EVIDENCE_LENGTH = 256
 
 _REDACTED = "<REDACTED>"
+#: Neutral marker replacing externally visible source paths (R4).
+_REDACTED_PATH = "[REDACTED_PATH]"
 _TRUNCATION_MARK = "… [+{} chars truncated]"
 
 # Compound credential keys (access_token, refresh_token, my_api_key ...)

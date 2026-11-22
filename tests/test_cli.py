@@ -235,7 +235,9 @@ class TestInputDiscovery(CliTestCase):
         code, _, err = self.run_cli([missing, str(good), "--strict"])
         self.assertEqual(code, 2)  # FR-100/FR-152
         self.assertIn("strict mode abort", err)
-        self.assertIn("ghost.log", err)
+        # R4: the path is replaced with the neutral marker.
+        self.assertIn("[REDACTED_PATH]", err)
+        self.assertNotIn("ghost.log", err)
 
     def test_discovery_order_preserved(self):
         a = self.write("a.log", auth_line("11:20:01") + "\n")
@@ -392,7 +394,9 @@ class TestReporting(CliTestCase):
         self.assertEqual(code, 2)
         payload = self.read_json("r.json")
         self.assertEqual(payload["errors"][0]["kind"], "input")
-        self.assertIn("ghost.log", payload["errors"][0]["source_file"])
+        # R4: source paths are never echoed in externally visible reports.
+        self.assertEqual(payload["errors"][0]["source_file"],
+                         "[REDACTED_PATH]")
 
     def test_error_overflow_handled_by_report_layer(self):
         garbage = "\n".join(f"junk {n}" for n in range(150)) + "\n"
@@ -437,7 +441,9 @@ class TestErrorHandling(CliTestCase):
         code, _, err = self.run_cli([str(bad), str(good), "--strict"])
         self.assertEqual(code, 2)  # AC-007
         self.assertIn("strict mode abort", err)
-        self.assertIn("bad.log", err)
+        # R4: the path is never echoed; line number is preserved.
+        self.assertIn("[REDACTED_PATH]", err)
+        self.assertNotIn("bad.log", err)
         self.assertIn("line 1", err)
 
     def test_strict_abort_reason_sanitized_on_stderr(self):
@@ -455,7 +461,10 @@ class TestErrorHandling(CliTestCase):
         self.assertIn("strict mode abort", err)
         self.assertIn("<REDACTED>", err)   # marker present
         self.assertNotIn("hunter2", err)   # secret value absent
-        self.assertIn("secret.log", err)   # diagnostic context preserved
+        # R4: the source path is externally visible, so it is replaced
+        # with the neutral marker; the file name must not appear.
+        self.assertIn("[REDACTED_PATH]", err)
+        self.assertNotIn("secret.log", err)
 
     def test_strict_abort_exception_mapping(self):
         cases = {
@@ -470,7 +479,9 @@ class TestErrorHandling(CliTestCase):
                                    reason="whatever", kind=kind)
                 exception = cli._strict_abort(entry)
                 self.assertIsInstance(exception, expected_type)
-                self.assertIn("f.log", str(exception))
+                # R4: the path is never echoed; line number is preserved.
+                self.assertIn("[REDACTED_PATH]", str(exception))
+                self.assertNotIn("f.log", str(exception))
                 self.assertIn("line 3", str(exception))
 
     def test_unexpected_exception_returns_exit_3_with_short_diagnostic(self):
@@ -517,7 +528,9 @@ class TestStrictFilesystemRace(CliTestCase):
         self.assertEqual(payload["statistics"]["files_scanned"], 1)
         self.assertEqual(payload["errors"][0]["kind"], "input")
         self.assertIn("cannot read file", payload["errors"][0]["reason"])
-        self.assertIn("gone.log", payload["errors"][0]["source_file"])
+        # R4: source paths are never echoed in externally visible reports.
+        self.assertEqual(payload["errors"][0]["source_file"],
+                         "[REDACTED_PATH]")
 
     def test_strict_mode_aborts_on_parse_time_race(self):
         keep = self.write("keep.log", auth_line("11:20:01") + "\n")
@@ -528,7 +541,9 @@ class TestStrictFilesystemRace(CliTestCase):
             code, _, err = self.run_cli([str(gone), str(keep), "--strict"])
         self.assertEqual(code, 2)                # strict abort -> exit 2
         self.assertIn("strict mode abort", err)
-        self.assertIn("gone.log", err)           # diagnostic names the file
+        # R4: the path is replaced with the neutral marker.
+        self.assertIn("[REDACTED_PATH]", err)
+        self.assertNotIn("gone.log", err)
         self.assertIn("Permission denied", err)  # filesystem context
 
     def test_strict_mode_does_not_parse_subsequent_files(self):

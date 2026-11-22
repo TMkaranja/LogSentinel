@@ -48,6 +48,7 @@ from .events import (  # noqa: F401 - re-exported contract symbols
     MAX_EVIDENCE_LENGTH,
     _cap,
     _redact,
+    _REDACTED_PATH,
     _sanitize,
 )
 
@@ -172,7 +173,7 @@ def _finding_to_json(finding: Finding) -> dict[str, object]:
 
 def _error_to_json(entry: ErrorEntry) -> dict[str, object]:
     return {
-        "source_file": _cap(entry.source_file),
+        "source_file": _REDACTED_PATH,  # R4: paths never echoed externally
         "line_number": entry.line_number,
         "reason": _sanitize(entry.reason),
         "kind": entry.kind,
