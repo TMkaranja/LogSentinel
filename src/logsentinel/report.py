@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -43,27 +42,17 @@ __all__ = [
 REPORT_VERSION = 1
 
 #: Maximum rendered length of evidence excerpts and error text (FR-043/FR-162).
-MAX_EVIDENCE_LENGTH = 256
+#: Owned by the leaf event module (shared with ErrorEntry construction-time
+#: sanitization, M6); re-exported here for the public reporting contract.
+from .events import (  # noqa: F401 - re-exported contract symbols
+    MAX_EVIDENCE_LENGTH,
+    _cap,
+    _redact,
+    _sanitize,
+)
 
 #: Maximum number of error entries rendered (FR-154).
 MAX_REPORTED_ERRORS = 100
-
-_REDACTED = "<REDACTED>"
-_TRUNCATION_MARK = "… [+{} chars truncated]"
-
-# Compound credential keys (access_token, refresh_token, my_api_key ...)
-# are matched by allowing an arbitrary word prefix before the secret word.
-_SECRET_KV = re.compile(
-    r"(?i)(?P<key>\b[\w.-]*?(?:password|passwd|pwd|token|api[_-]?key|secret|authorization)\b)"
-    r"(?P<sep>[\"']?\s*[=:]\s*)"
-    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s&\"']+)"
-)
-
-# Authorization headers: the entire remainder of the line is redacted
-# (scheme plus credentials, e.g. "Authorization: Bearer <jwt>").
-_AUTH_HEADER = re.compile(
-    r"(?i)(\bauthorization\b[ \t]*[=:][ \t]*).*"
-)
 
 _SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
 _STAT_ORDER = (
@@ -99,34 +88,9 @@ class RunStatistics:
                     f"expected a non-negative integer, got {value!r}")
 
 
-def _redact(text: str) -> str:
-    """Replace credential-bearing values with a fixed marker.
-
-    Conservative and deterministic: only keyed patterns from the approved
-    list are redacted; encoded key names, unknown vocabularies and raw
-    blobs are not detected (documented limitation - not universal secret
-    detection). Values are never echoed, hashed or partially preserved.
-    """
-    def _sub(match: re.Match[str]) -> str:
-        value = match.group("value")
-        quote = value[:1] if value[:1] in ("\"", "'") else ""
-        return match.group("key") + match.group("sep") + quote + _REDACTED + quote
-
-    text = _AUTH_HEADER.sub(lambda m: m.group(1) + _REDACTED, text)
-    return _SECRET_KV.sub(_sub, text)
-
-
-def _cap(text: str) -> str:
-    """Truncate after redaction; the marker never reveals suppressed text."""
-    if len(text) <= MAX_EVIDENCE_LENGTH:
-        return text
-    hidden = len(text) - MAX_EVIDENCE_LENGTH
-    return text[:MAX_EVIDENCE_LENGTH] + _TRUNCATION_MARK.format(hidden)
-
-
-def _sanitize(text: str) -> str:
-    """Redact first, then cap (Phase 4.4 contract, gaps 2/3)."""
-    return _cap(_redact(text))
+# _redact/_cap/_sanitize are imported from .events above (M6: the single
+# sanitizer implementation is shared with ErrorEntry construction-time
+# sanitization).
 
 
 def _finding_sort_key(finding: Finding) -> tuple[str, int, str]:

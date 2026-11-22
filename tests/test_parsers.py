@@ -387,6 +387,19 @@ class TestStreamingProtocol(unittest.TestCase):
         self.assertEqual(stats.malformed + stats.events_parsed,
                          stats.lines_read)
 
+    def test_stream_error_reasons_pre_sanitized(self):
+        """M6: ErrorEntry construction-time sanitization covers the
+        streaming production path - yielded reasons are already
+        redacted/capped before any caller (CLI staging) sees them.
+        """
+        bad_ip = b"Mar 10 11:20:01 h sshd[1001]: Failed password for admin " \
+                 b"from password=hunter2 port 22 ssh2\n"
+        items = self.stream(self.AUTH + bad_ip)
+        error = items[1][1]
+        self.assertEqual(error.kind, "parse")
+        self.assertIn("<REDACTED>", error.reason)
+        self.assertNotIn("hunter2", error.reason)
+
     def test_intra_file_duplicates_preserved_and_counted(self):
         items = self.stream(self.AUTH + self.AUTH)
         events = [item for tag, item in items if tag == "event"]

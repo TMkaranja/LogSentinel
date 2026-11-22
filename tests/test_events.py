@@ -271,6 +271,40 @@ class TestBookkeepingStructures(unittest.TestCase):
         e = ErrorEntry(source_file="f", line_number=3, reason="boom")
         self.assertEqual(e.kind, "parse")
 
+    def test_error_entry_reason_sanitized_at_construction(self):
+        """M6 (security audit R1 follow-up): token-bearing parser exception
+        reasons are sanitized before being retained in ErrorEntry objects
+        (and therefore before SQLite staging).
+        """
+        e = ErrorEntry(source_file="f", line_number=3,
+                       reason="'token=abc123' does not appear to be "
+                              "an IPv4 address")
+        self.assertIn("<REDACTED>", e.reason)
+        self.assertNotIn("abc123", e.reason)
+
+    def test_error_entry_non_sensitive_reasons_unchanged(self):
+        for reason in ("unparseable line", "overlong line", "empty line",
+                       "utf-8 decode failed; retried as latin-1",
+                       "cannot read file: PermissionError: denied",
+                       "plain diagnostic text"):
+            e = ErrorEntry(source_file="f", line_number=None, reason=reason)
+            self.assertEqual(e.reason, reason)
+            self.assertNotIn("<REDACTED>", e.reason)
+
+    def test_error_entry_reason_capped_at_construction(self):
+        e = ErrorEntry(source_file="f", line_number=None,
+                       reason="r" * 400 + " token=zzz")
+        self.assertEqual(e.reason[:256], "r" * 256)
+        self.assertTrue(e.reason.endswith("chars truncated]"))
+        self.assertNotIn("zzz", e.reason)  # redact-before-cap ordering
+
+    def test_error_entry_sanitization_idempotent(self):
+        once = ErrorEntry(source_file="f", line_number=None,
+                          reason="password=hunter2 leaked")
+        twice = ErrorEntry(source_file="f", line_number=None,
+                           reason=once.reason)
+        self.assertEqual(once.reason, twice.reason)
+
     def test_file_stats_defaults(self):
         s = FileStats()
         self.assertEqual((s.lines_read, s.events_parsed, s.malformed,
