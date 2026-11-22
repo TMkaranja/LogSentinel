@@ -914,6 +914,110 @@ class TestCleanupLocks(StorageTestCase):
                 os.rmdir(directory)
 
 
+class TestStagedPathRedaction(StorageTestCase):
+    """FR-162 remediation: credential-bearing values embedded in parsed
+    HTTP path fields are sanitized at staging time before SQLite
+    persistence. The shared events.py sanitizer is reused (no second
+    vocabulary); the evidence cap is not applied to parsed paths; the
+    in-memory event used by detectors is never mutated; fingerprints and
+    deduplication keep operating on the original raw line.
+    """
+
+    def _staged_path(self, path):
+        with self.storage() as store:
+            store.stage_event(http(path=path))
+            return store._conn.execute(
+                "SELECT path FROM events WHERE kind='web'"
+            ).fetchone()[0]
+
+    def test_credential_values_in_staged_path_redacted(self):
+        cases = {
+            "/login?password=hunter2": "/login?password=<REDACTED>",
+            "/api?api_key=AK12345": "/api?api_key=<REDACTED>",
+            "/auth?session_id=abc123": "/auth?session_id=<REDACTED>",
+        }
+        for original, expected in cases.items():
+            with self.subTest(path=original):
+                self.assertEqual(self._staged_path(original), expected)
+
+    def test_ordinary_paths_and_parameters_unchanged(self):
+        ordinary = [
+            "/index.html",
+            "/api/v1/users/42",
+            "/search?q=common+words&lang=en",
+            "/assets/app.css?v=1638",
+            "/login?user=alice&next=/home",
+            "/download?file=report.pdf",
+        ]
+        for path in ordinary:
+            with self.subTest(path=path):
+                self.assertEqual(self._staged_path(path), path)
+
+    def test_no_evidence_cap_applied_to_parsed_path(self):
+        # A credential-bearing path far longer than MAX_EVIDENCE_LENGTH is
+        # redacted but NOT truncated (no cap on parsed paths).
+        filler = "q" * 400
+        staged = self._staged_path(f"/search?password=secret&{filler}=1")
+        self.assertIn("<REDACTED>", staged)
+        self.assertNotIn("secret", staged)
+        self.assertIn(filler, staged)
+        self.assertNotIn("[+", staged)  # no truncation marker appended
+
+    def test_in_memory_event_path_not_mutated(self):
+        event = http(path="/login?password=hunter2")
+        with self.storage() as store:
+            store.stage_event(event)
+            self.assertEqual(event.path, "/login?password=hunter2")
+            staged = store._conn.execute(
+                "SELECT path FROM events WHERE kind='web'").fetchone()[0]
+            self.assertEqual(staged, "/login?password=<REDACTED>")
+            self.assertEqual(event.raw_line, "http-line")
+
+    def test_ordinary_ssh_username_unchanged(self):
+        with self.storage() as store:
+            store.stage_event(ssh(ts=10, line="ssh-line", user="admin"))
+            row = store._conn.execute(
+                "SELECT username FROM events WHERE kind='authfail'").fetchone()
+            self.assertEqual(row[0], "admin")
+
+    def test_replay_roundtrip_with_redacted_path(self):
+        with self.storage() as store:
+            store.stage_event(http(path="/login?password=hunter2"))
+            rows = list(store.iter_events())
+        self.assertEqual(len(rows), 1)
+        event = rows[0]
+        self.assertEqual(event.path, "/login?password=<REDACTED>")
+        # Reconstructed event remains fully valid for detection reuse.
+        self.assertEqual(event.kind, "web")
+        self.assertEqual(event.method, "GET")
+        self.assertEqual(event.status_code, 404)
+
+    def test_dedup_and_fingerprint_use_original_line(self):
+        line = '192.0.2.9 - - [10/Mar/2026:11:00:01 +0000] ' \
+               '"GET /login?password=hunter2 HTTP/1.1" 401 5'
+        with self.storage() as store:
+            ev = http(ts=1, line=line, path="/login?password=hunter2")
+            # Dedup runs on the ORIGINAL unsanitized identity (fp over
+            # the original raw line), regardless of sanitized storage.
+            self.assertFalse(store.fingerprint_seen(ev))
+            store.stage_event(ev)
+            self.assertTrue(store.fingerprint_seen(ev))
+            ev2 = http(ts=2, line=line + " trailing", source="c.log",
+                       path="/login?password=hunter2&x=1")
+            self.assertFalse(store.fingerprint_seen(ev2))
+            store.stage_event(ev2)
+            self.assertEqual(
+                store._conn.execute(
+                    "SELECT COUNT(*) FROM events").fetchone()[0], 2)
+            # fp for the original unsanitized identity is reproducible.
+            import logsentinel.storage as storage_mod
+            expected = storage_mod._event_fingerprint(
+                store._hmac_key, ev.kind, ev.timestamp, ev.raw_line)
+            stored = store._conn.execute(
+                "SELECT fp_digest FROM events WHERE timestamp=1").fetchone()[0]
+            self.assertEqual(bytes(stored), expected)
+
+
 class TestStaleSweeper(StorageTestCase):
     """R1 step: stale-directory sweeper (injectable root and time;
     tests operate only on fixtures under self.tmp)."""

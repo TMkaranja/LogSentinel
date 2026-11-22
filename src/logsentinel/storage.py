@@ -86,6 +86,7 @@ from .events import (
     SSHAuthEvent,
     SecurityEvent,
     SyslogEvent,
+    _redact,
     _sanitize,
 )
 
@@ -710,7 +711,13 @@ class RunStorage:
             row[11] = event.protocol
         elif isinstance(event, HTTPRequestEvent):
             row[12] = event.method
-            row[13] = event.path
+            # FR-162 remediation: the parsed path may itself be
+            # credential-bearing (e.g. ``/login?password=secret``). The
+            # shared events.py redaction is applied to the persisted
+            # column only -- WITHOUT the evidence-length cap (requirement:
+            # parsed paths are not capped); the in-memory event used by
+            # detectors is untouched.
+            row[13] = _redact(event.path)
             row[14] = event.status_code
         elif not isinstance(event, SyslogEvent):  # pragma: no cover - guard
             raise ValueError(f"unsupported event kind: {kind!r}")
