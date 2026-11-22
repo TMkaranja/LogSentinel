@@ -1,7 +1,7 @@
 # LogSentinel — Security Audit and Remediation Record
 
 - **Document:** SECURITY_AUDIT.md
-- **Status:** findings R1–R5 recorded; R2 remediation verified and committed
+- **Status:** findings R1–R5 recorded; R2, M6, and M1 remediations verified and committed
 - **Related requirements:** FR-162 and NFR-009 (docs/REQUIREMENTS.md §14/§15)
 
 ## 1. Audit Scope and Context
@@ -27,7 +27,7 @@ detection rule `LS-RULE-002` (port-scan detection).
 
 | ID | Finding | Impact | Status |
 |----|---------|--------|--------|
-| **R1** | Sensitive raw lines in temporary SQLite staging | Raw log lines — which can contain credentials — are stored verbatim in the temporary SQLite staging database during processing (needed for evidence reconstruction). The database is deleted when the run ends, but secrets exist in plaintext on disk for the run's duration. | **OPEN** |
+| **R1** | Sensitive raw lines in temporary SQLite staging | *Historical (resolved for the identified path):* raw log lines — which could contain credentials — were once stored verbatim in the temporary SQLite staging database during processing, leaving plaintext secrets on disk for the run's duration. Commit `37d19de` (M1) replaced this with sanitized evidence lines and per-run keyed HMAC fingerprints; the database now contains no raw-line column or raw-line index. | **RESOLVED for the identified path** (residual risks remain — see §4) |
 | **R2** | Strict-mode stderr leakage | Strict-mode abort messages could expose sensitive tokens embedded in parser diagnostic reasons (e.g. invalid-IP validation errors echo the offending token from the log line). The message is now sanitized before being returned and printed. | **RESOLVED for the identified path** (see §3) |
 | **R3** | Unexpected exception output | The unexpected-failure diagnostic (exit code 3) prints the exception text to stderr; that text is not sanitized and could expose sensitive information in arbitrary failure cases. | **OPEN** |
 | **R4** | Source-path redaction | `source_file` values are length-capped in reports but are not comprehensively redacted; a credential-shaped path name could survive into the report (truncated). | **OPEN** |
@@ -70,12 +70,58 @@ fixed.
 
 ## 4. Outstanding Risks
 
-- **R1 (OPEN):** while a run is active, raw lines containing credentials sit in
-  the temporary staging database in plaintext. Storing raw lines is a current
-  design requirement (evidence reconstruction), so resolving R1 requires an
-  explicit decision: accept and document the temporary-storage exposure, or
-  redesign evidence handling. Until then, processed logs with secrets leave
-  readable traces in the system temporary directory for the duration of a run.
+- **R1 (RESOLVED for the identified path — commit `37d19de`, "Add per-run
+  HMAC fingerprints and sanitized staging (M1)"):** raw log lines are no
+  longer stored in SQLite. The `events` table now holds `evidence_line
+  TEXT` (the sanitized original line) and `fp_digest BLOB` (a per-run
+  keyed HMAC-SHA256 digest of the exact identity ``(kind, timestamp,
+  raw_line)``); the former `raw_line` column and raw-line index were
+  removed. Evidence and error reasons are sanitized before persistence:
+  `evidence_line` is sanitized at staging, and error reasons are
+  sanitized at `ErrorEntry` construction (commit `58d1806`, M6). The
+  HMAC key is 32 bytes from `secrets.token_bytes`, generated once per
+  `RunStorage` instance, held only in memory for the instance lifetime,
+  and never persisted, logged, or reported; the same key is used across
+  transaction rollback and UTF-8 retry, and every new run generates a
+  fresh key. Digests are computed from the original identity before
+  sanitization, using a domain-separated, length-prefixed encoding
+  (`LogSentinel:event-fingerprint:v1\0` plus length-prefixed fields and
+  a fixed-width signed 64-bit timestamp).
+
+  The per-run key means fingerprints from one run cannot be matched
+  against fingerprints from another run, preventing straightforward
+  cross-run fingerprint correlation. Within a single run's database,
+  however, repeated identical events still produce identical digests, so
+  the fingerprints expose equality patterns (how often each exact event
+  identity occurred) to anyone who can read the database file.
+  Association with files is available through the separately stored
+  `source_file` field.
+
+  Evidence: `tests/test_storage.py::TestHmacFingerprints` (11 tests,
+  including no-`raw_line`-in-any-DDL, plaintext-absence from the database
+  file at rest, key non-persistence and non-exposure, rollback/retry key
+  stability, and adversarial unambiguous encoding); full suite at HEAD
+  `37d19de`: 372 tests OK, 9 skipped.
+
+  **R1 residual risks (documented, not eliminated):**
+  (a) sanitization is best-effort — unrecognized secret formats may
+  remain in `evidence_line`; (b) other parsed fields that are still
+  stored — `username`, `path`, `method`, `src_ip`, `dst_ip`, and
+  `source_file` — may themselves contain sensitive information;
+  (c) abnormal termination (kill, power loss) can leave the temporary
+  SQLite file behind, containing sanitized evidence, sanitized error
+  reasons, parsed fields, and digests; (d) HMAC-SHA256 carries a
+  theoretical collision risk — within practical keyed-collision
+  resistance, digest equality stands in for exact identity, and the
+  per-run key prevents straightforward fingerprint matching across runs,
+  but does not prevent identification through other stored database
+  fields or evidence; (e) the sanitizer bypass classes documented
+  under R5 apply to staged `evidence_line` exactly as they do to
+  reports, so unrecognized secrets can persist there. These residuals
+  mean **FR-162 is not fully satisfied**: literal compliance — that
+  credential-bearing fields are never stored — is not demonstrated,
+  because unrecognized secret formats and other parsed fields can still
+  be persisted in sanitized or parsed form.
 - **R3 (OPEN):** unexpected-failure stderr output is unsanitized by design
   (short diagnostics for exit code 3). A failure whose exception text contains
   log-derived content could expose it. Bounding or sanitizing this output
@@ -96,8 +142,9 @@ fixed.
   The length cap is a backstop, not a security boundary: a 256-character
   evidence cap does not ensure that secrets cannot leak.
 - **FR-162 and NFR-009 must not be described as fully satisfied** while the
-  documented gaps (R1, R3, R4, R5) remain unresolved. The accurate public
+  documented gaps (R3, R4, R5, and R1's residual risks) remain unresolved. The accurate public
   position — already stated in docs/USAGE.md §8.4 and docs/ARCHITECTURE.md §5 —
   is that redaction is best-effort and users should not feed secret-bearing
   logs to tools they do not trust.
-- Findings R1, R3, R4, and R5 remain open for future remediation decisions.
+- Findings R3, R4, and R5 remain open for future remediation decisions;
+  R1 is resolved for its identified path with documented residual risks.
