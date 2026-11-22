@@ -1,0 +1,29 @@
+# LogSentinel — continuous integration (FR-175).
+#
+# Runs the full stdlib-unittest suite on every push and pull request.
+# No installation step is required: the project has no third-party runtime
+# dependencies (NFR-001) and tests/__init__.py adds src/ to sys.path for the
+# src-layout, so `python -m unittest discover` from the repository root is the
+# canonical invocation (FR-170/NFR-007).
+
+name: LogSentinel test suite
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    name: Run full unittest suite (Python 3.14, ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Run full test suite
+        run: python -m unittest discover

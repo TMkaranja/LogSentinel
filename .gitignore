@@ -1,0 +1,25 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging / build artifacts
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Generated reports and demonstration artifacts
+report.json
+report.txt
+report-explicit.json
+audit-*
+
+# OS cruft
+.DS_Store
+Thumbs.db
