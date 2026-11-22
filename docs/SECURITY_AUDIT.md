@@ -29,7 +29,7 @@ detection rule `LS-RULE-002` (port-scan detection).
 |----|---------|--------|--------|
 | **R1** | Sensitive raw lines in temporary SQLite staging | *Historical (resolved for the identified path):* raw log lines — which could contain credentials — were once stored verbatim in the temporary SQLite staging database during processing, leaving plaintext secrets on disk for the run's duration. Commit `37d19de` (M1) replaced this with sanitized evidence lines and per-run keyed HMAC fingerprints; the database now contains no raw-line column or raw-line index. | **RESOLVED for the identified path** (residual risks remain — see §4) |
 | **R2** | Strict-mode stderr leakage | Strict-mode abort messages could expose sensitive tokens embedded in parser diagnostic reasons (e.g. invalid-IP validation errors echo the offending token from the log line). The message is now sanitized before being returned and printed. | **RESOLVED for the identified path** (see §3) |
-| **R3** | Unexpected exception output | The unexpected-failure diagnostic (exit code 3) prints the exception text to stderr; that text is not sanitized and could expose sensitive information in arbitrary failure cases. | **OPEN** |
+| **R3** | Unexpected exception output | The unexpected-failure diagnostic (exit code 3) printed the raw exception message to stderr; that text could expose log-derived content in arbitrary failure cases. The message is now sanitized (best-effort, single shared sanitizer) before printing; the exception class name, short-diagnostic behaviour and exit code 3 are unchanged. | **RESOLVED for the identified output path** (best-effort limitations apply — see §4) |
 | **R4** | Source-path redaction | Source paths appeared in externally visible error outputs (JSON error entries length-capped but not redacted; strict-mode abort diagnostics echoed the full uncapped path); a credential-shaped path name or OS username could survive into the output. Output paths are now replaced with the neutral marker `[REDACTED_PATH]`. | **RESOLVED for externally visible outputs** (source paths remain internally and in temporary storage — see §4) |
 | **R5** | Redaction bypass limitations | The existing redaction is best-effort: it matches credential-shaped key/value pairs and Authorization headers only. It cannot guarantee detection of every secret format or encoding (bare tokens, unrecognized key names, separator variations, multi-line secrets, non-percent encodings). This is a documented design limitation, not a defect introduced by the R2 fix. | **OPEN** |
 
@@ -122,10 +122,23 @@ fixed.
   credential-bearing fields are never stored — is not demonstrated,
   because unrecognized secret formats and other parsed fields can still
   be persisted in sanitized or parsed form.
-- **R3 (OPEN):** unexpected-failure stderr output is unsanitized by design
-  (short diagnostics for exit code 3). A failure whose exception text contains
-  log-derived content could expose it. Bounding or sanitizing this output
-  changes the FR-153 diagnostic contract and requires authorization.
+- **R3 (RESOLVED for the identified output path):** the outermost CLI
+  exception boundary (`cli.py`, `except Exception` arm) now applies the single
+  shared sanitizer (`_sanitize`) to the exception message text before printing
+  it to stderr. The exception **class name** is code-side context, not
+  log-derived, and is preserved; the diagnostic prefix, stderr destination,
+  short-diagnostic behaviour (no traceback, FR-153) and exit code 3 are
+  unchanged, and the FR-153 contract text is not modified. Regression test:
+  `tests/test_cli.py::TestErrorHandling.test_unexpected_exception_message_sanitized`
+  (a detector failure whose message embeds `password=hunter2` produces
+  `<REDACTED>` on stderr, with the secret value absent, class name retained,
+  exit code 3, and no traceback — it would fail under the previous raw
+  `str(exc)` implementation). **Best-effort limitation (R5 applies):** the
+  sanitizer recognizes only credential-shaped key/value patterns and
+  Authorization headers; unrecognized secret formats in an exception message
+  are not detected and could still reach stderr. Unknown future failure modes
+  may also produce message shapes the sanitizer handles differently (e.g.
+  truncation at 256 characters), which is acceptable for a short diagnostic.
 - **R4 (RESOLVED for externally visible outputs):** source paths are replaced
   with the neutral marker `[REDACTED_PATH]` in JSON report error entries and in
   strict-mode abort diagnostics (line number and kind preserved — they are not
@@ -156,10 +169,12 @@ fixed.
   The length cap is a backstop, not a security boundary: a 256-character
   evidence cap does not ensure that secrets cannot leak.
 - **FR-162 and NFR-009 must not be described as fully satisfied** while the
-  documented gaps (R3, R5, and R1's residual risks) remain unresolved. The accurate public
+  documented gaps (R5, and R1's residual risks) remain unresolved. The accurate public
   position — already stated in docs/USAGE.md §8.4 and docs/ARCHITECTURE.md §5 —
   is that redaction is best-effort and users should not feed secret-bearing
   logs to tools they do not trust.
-- Findings R3, R4, and R5 remain open for future remediation decisions;
-  R1 and R2 are resolved for their identified paths with documented residuals.
-  (R4's residual: at-rest source-path exposure in temporary storage.)
+- Findings R5 remains open for future remediation decisions;
+  R1, R2, R3, and R4 are resolved for their identified paths with documented
+  residuals (R1: at-rest sensitivity and abnormal-termination residue; R3:
+  best-effort sanitizer limitations; R4: at-rest source-path exposure in
+  temporary storage).

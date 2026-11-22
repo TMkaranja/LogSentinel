@@ -434,6 +434,13 @@ class BoomDetector(cli.HTTP4xxAbuseDetector):
         raise RuntimeError("boom")
 
 
+class LeakyBoomDetector(cli.HTTP4xxAbuseDetector):
+    """R3: detector whose failure message embeds a keyed log secret."""
+
+    def results(self):
+        raise RuntimeError("password=hunter2 leaked into detector state")
+
+
 class TestErrorHandling(CliTestCase):
     def test_strict_parser_error_aborts_exit_2(self):
         bad = self.write("bad.log", "totally not a log line\n")
@@ -492,6 +499,24 @@ class TestErrorHandling(CliTestCase):
         self.assertIn("unexpected failure", err)
         self.assertIn("RuntimeError", err)
         self.assertNotIn("Traceback", err)   # no traceback in normal CLI use
+        self.assertNotIn("Traceback", out)
+
+    def test_unexpected_exception_message_sanitized(self):
+        """Regression (security audit R3): an unexpected exception's message
+        can embed log-derived content; it is sanitized (best-effort) before
+        reaching stderr. Class name, short-diagnostic behaviour and exit
+        code 3 are preserved. Would fail under the previous implementation,
+        which printed str(exc) raw.
+        """
+        good = self.write("good.log", auth_line("11:20:01") + "\n")
+        with mock.patch.object(cli, "HTTP4xxAbuseDetector", LeakyBoomDetector):
+            code, out, err = self.run_cli([str(good)])
+        self.assertEqual(code, 3)                       # exit code unchanged
+        self.assertIn("unexpected failure", err)        # diagnostic prefix
+        self.assertIn("RuntimeError", err)              # class name preserved
+        self.assertIn("<REDACTED>", err)                # keyed secret redacted
+        self.assertNotIn("hunter2", err)                # secret absent
+        self.assertNotIn("Traceback", err)              # short diagnostic kept
         self.assertNotIn("Traceback", out)
 
     def test_application_errors_exit_2(self):

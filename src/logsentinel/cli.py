@@ -365,8 +365,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"logsentinel: {exc}", file=sys.stderr)
         return 2
     except Exception as exc:  # outermost application boundary only (FR-153)
+        # R3 (security audit): the message text of an arbitrary unexpected
+        # exception can embed log-derived content; sanitize it (best-effort,
+        # single shared sanitizer) before it reaches stderr. The exception
+        # class name is code-side context, not log-derived, and is
+        # preserved; the short-diagnostic behaviour (no traceback) and exit
+        # code 3 are unchanged. LogSentinelError handling above is separate.
         print(
             f"logsentinel: unexpected failure: "
-            f"{exc.__class__.__name__}: {exc}",
+            f"{exc.__class__.__name__}: {_sanitize(str(exc))}",
             file=sys.stderr)
         return 3
