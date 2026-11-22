@@ -105,9 +105,12 @@ Solid arrows are the main data flow; dashed arrows are error/config flows.
    (AR-001) and staged into SQLite with every field needed for reconstruction plus a
    monotonic ingestion sequence; errors are staged in arrival order; the per-file
    statistics row is staged at the end. Intra-file duplicate tracking is performed by
-   SQLite inside the same transaction (`RunStorage.fingerprint_seen`, an exact
-   `(kind, timestamp, raw_line, source_file)` check against the staged rows) — the
-   streaming path keeps no in-memory fingerprint collection.
+   SQLite inside the same transaction (`RunStorage.fingerprint_seen`, a
+   digest-equality check on `(kind, timestamp, fp_digest, source_file)` against the
+   staged rows — `fp_digest` is the per-run keyed HMAC-SHA256 digest of the logical
+   identity `(kind, timestamp, raw_line)`, so original raw lines are never persisted
+   in SQLite; M1, AR-005) —
+   the streaming path keeps no in-memory fingerprint collection.
 5. **Encoding fallback.** The UTF-8 attempt is staged inside its own transaction. If
    decoding fails anywhere in the file, the parser emits the rollback marker, the
    orchestrator rolls the transaction back (discarding the partial attempt's events,
@@ -118,11 +121,13 @@ Solid arrows are the main data flow; dashed arrows are error/config flows.
    not claimed.
 6. **Cross-file deduplication.** After all files are committed,
    `RunStorage.dedup_cross_file()` runs the approved multiplicity rule as a single SQL
-   statement: for every fingerprint `(kind, canonical timestamp, raw_line)`, occurrences
-   are counted per source file, the retention cap is the **maximum single-file
-   occurrence count**, the earliest-ingested occurrences are retained, and only the
-   excess is removed and counted as `cross_file_duplicates` (AR-005; identical repeats
-   within one file are preserved and count individually).
+   statement: for every fingerprint `(kind, canonical timestamp, fp_digest)` — the
+   per-run keyed HMAC-SHA256 digest of the logical identity `(kind, timestamp,
+   raw_line)` (M1) — occurrences are counted per source file, the retention cap is
+   the **maximum single-file occurrence count**, the earliest-ingested occurrences
+   are retained, and only the excess is removed and counted as
+   `cross_file_duplicates` (AR-005; identical repeats within one file are preserved
+   and count individually).
 7. **Incremental detection.** The detectors consume the deduplicated staged events in
    ingestion order via `observe(event)` and keep bounded per-IP aggregation state
    (NFR-004 permits per-IP aggregation; it is not a fixed memory bound — per-IP state
@@ -243,6 +248,7 @@ class HTTPRequestEvent(SecurityEvent):  # src_ip, method, path, status_code; kin
 class SyslogEvent(SecurityEvent):       # kind othersyslog; context only, never detected
 @dataclass(frozen=True, slots=True)
 class ErrorEntry:         # source_file, line_number, reason, kind (config|input|parse|report)
+                          # reason is sanitized at construction (M6; best-effort)
 @dataclass(frozen=True, slots=True)
 class FileStats:          # lines_read, events_parsed, malformed, duplicates,
                           # othersyslog, othersyslog_dropped
@@ -298,10 +304,15 @@ class RunStorage:            # context manager; temp SQLite database
 
 Tables and indexes:
 
-- `events(seq, kind, timestamp, raw_timestamp, raw_line, source_file, src_ip, username,
-  success, dst_ip, dst_port, protocol, method, path, status_code)` with indexes on
-  `(src_ip, timestamp, kind, seq)` and on the fingerprint triple
-  `(kind, timestamp, raw_line)`;
+- `events(seq, kind, timestamp, raw_timestamp, evidence_line, fp_digest, source_file,
+  src_ip, username, success, dst_ip, dst_port, protocol, method, path, status_code)`
+  with indexes on `(src_ip, timestamp, kind, seq)` and on the per-run keyed digest
+  triple `(kind, timestamp, fp_digest)`. `evidence_line` is the sanitized original
+  line — sanitized before staging, so the raw line is never written to the database
+  (M1); `fp_digest` is the per-run keyed HMAC-SHA256 digest of the logical identity
+  `(kind, timestamp, raw_line)`; the HMAC key lives only in memory for the
+  `RunStorage` instance lifetime (§14). No `raw_line` column or raw-line index
+  exists;
 - `errors(seq, source_file, line_number, reason, kind)`;
 - `file_stats(seq, source_file, lines_read, events_parsed, malformed, duplicates,
   othersyslog, othersyslog_dropped)`.
@@ -377,8 +388,10 @@ Finding list (AR-007)  ->  report.py (sanitize/truncate)  ->  stdout + optional
 JSON + text files + exit code
 ```
 
-An event's evidence always points back to the original raw line and file so every
-finding is auditable (FR-043). Retained events are not guaranteed to exist "exactly
+Each event retains sanitized evidence derived from the original log line and its
+associated source file so every finding remains auditable (FR-043); the original
+unsanitized line is never stored and cannot be reconstructed from the database
+(M1). Retained events are not guaranteed to exist "exactly
 once" in the detector input: identical repeats within one file are preserved and count
 individually, and cross-file retention keeps occurrences up to the per-file
 multiplicity cap.
@@ -410,7 +423,12 @@ multiplicity cap.
   validation into every detector.
 - **AR-005 — Duplicate handling (final, Phase 3 remediation; implemented in Phase 5
   storage).** The fingerprint `(kind, canonical timestamp, raw_line)` identifies
-  re-ingestion. Identical repeated events **within one file are preserved** and count
+  re-ingestion. *M1 implementation note:* this identity is logical; SQLite persists a
+  per-run keyed HMAC-SHA256 digest of the identity instead of the original raw line,
+  so the raw line never reaches the database (security audit finding R1,
+  docs/SECURITY_AUDIT.md; within the practical collision resistance of keyed
+  HMAC-SHA256, digest equality stands in for exact identity). Identical repeated
+  events **within one file are preserved** and count
   individually — real sources can emit identical lines for distinct events (netfilter
   lines carry no unique token, SSH ports can be reused, timestamps are second-granular).
   Cross-file duplicate handling is multiplicity-aware: occurrences are counted per
@@ -438,7 +456,12 @@ multiplicity cap.
 Two channels, never mixed (AR-012):
 
 1. **Data channel (normal mode).** Recoverable problems — bad line, unreadable file,
-   oversized file, discovery failure — become `ErrorEntry` records. In the streaming
+   oversized file, discovery failure — become `ErrorEntry` records. The `reason` text
+   is sanitized at `ErrorEntry` construction (M6, best-effort credential redaction:
+   recognized key/value and Authorization-header patterns are replaced with
+   `<REDACTED>`; unrecognized secret formats are not detected — security audit
+   finding R5), so the staged `errors` table and the reports never receive unsanitized
+   diagnostic text. In the streaming
    pipeline they are staged in the SQLite `errors` table in arrival order (discovery
    errors first) rather than accumulated in memory; the report receives the first
    `max_reported_errors` (default 100) entries plus the exact total via
@@ -489,7 +512,8 @@ tests.
    is the staged, typed SQLite schema (AR-001).
 5. **Determinism.** Same input + config yields the same findings and (except
    `generated_at`) the same JSON report (FR-042).
-6. **Evidence over conclusions.** Findings carry raw-line evidence; wording states
+6. **Evidence over conclusions.** Findings carry evidence derived from the original
+   log line, sanitized at staging (M1); wording states
    "suspicious pattern", never "attack confirmed".
 7. **Stream, do not buffer.** The pipeline avoids buffering a whole file's or the whole
    run's parsed events (NFR-004): events and errors are staged in SQLite as they
@@ -505,7 +529,7 @@ tests.
 | AR-002 | Canonical time = integer Unix epoch seconds, UTC | Exact window math; stable JSON; no tz drift |
 | AR-003 | Naive timestamps interpreted as UTC | Result independent of analysis-host timezone |
 | AR-004 | Yearless syslog timestamps: current year with >24h-future rollover, against injected `reference_now` | Deterministic; handles Dec-Jan rollover |
-| AR-005 | Content-addressed dedup, cross-file scope with per-file multiplicity retention (section 8, final: Phase 3 remediation; SQLite implementation: Phase 5) | Re-ingestion collapsed across files; intra-file identical lines preserved |
+| AR-005 | Duplicate handling by logical event identity in memory; keyed-digest (per-run HMAC) persistence in SQLite — not ordinary content addressing at rest (section 8, final: Phase 3 remediation; SQLite implementation: Phase 5; at-rest representation: M1) | Re-ingestion collapsed across files; intra-file identical lines preserved; original raw lines are not persisted in SQLite (R1) |
 | AR-006 | Half-open sliding window `(t-w, t]` | Unambiguous boundaries, no double counting |
 | AR-007 | Findings as dataclasses: rule_id, severity, src_ip, first/last seen, evidence, summary | Machine-readable and renderable; detection separated from presentation |
 | AR-008 | Three-layer config precedence: defaults < JSON file < CLI | Predictable, testable; single owner module |
@@ -573,6 +597,27 @@ semantics. Known limitation retained: the Latin-1 retry reads the file a second 
 a file changing between attempts can produce mixed content; byte-snapshot consistency is
 not claimed.
 
+### 13.6 M1/M6 Security Remediations
+
+Authorized security remediations, recorded in full in `docs/SECURITY_AUDIT.md`:
+
+- **M1 (commit `37d19de`) — sanitized SQLite evidence and per-run keyed HMAC
+  fingerprints.** The `events` table stores `evidence_line` (the sanitized original
+  line) and `fp_digest` (a per-run keyed HMAC-SHA256 digest of the logical identity
+  `(kind, timestamp, raw_line)`) instead of the raw line; the raw-line column and
+  raw-line index were removed. Deduplication identity and all multiplicity semantics
+  are unchanged. Behaviour is preserved: console output is byte-identical, and JSON
+  output is byte-identical after normalizing `generated_at`. The HMAC
+  key is generated by `RunStorage` with `secrets.token_bytes(32)` and held only in
+  memory for the instance lifetime (§14). Residual risks (best-effort sanitization,
+  stored parsed fields, abnormal-termination residue, theoretical HMAC collisions,
+  R5 bypass classes) remain documented in `docs/SECURITY_AUDIT.md`; FR-162/NFR-009
+  are not fully satisfied.
+- **M6 (commit `58d1806`) — construction-time error-reason sanitization.**
+  `ErrorEntry.reason` is sanitized at construction (best-effort; same single
+  sanitizer as the report layer), so in-memory error objects and the SQLite `errors`
+  table never receive unsanitized diagnostic text. Report behaviour unchanged.
+
 ## 14. Temporary SQLite Database Lifecycle
 
 - **Creation.** `RunStorage()` creates a directory in the system temporary location
@@ -585,6 +630,13 @@ not claimed.
   resource is disposed (connection closed, database file and owned directory removed),
   the original exception is re-raise unchanged, and any removal failure during that
   disposal is recorded in `cleanup_errors` rather than raised or silently swallowed.
+- **Per-run HMAC key (M1).** `RunStorage.__init__` generates a 32-byte key with
+  `secrets.token_bytes(32)` and holds it in memory for the instance lifetime — it is
+  not persisted, logged, or reported by the application, and it is regenerated for
+  every new run. The same key is retained across transaction rollback and UTF-8
+  retry (it is not tied to any transaction), so fingerprints computed before and
+  after a rollback are comparable. This documents application behaviour only; no
+  protection is claimed against every possible memory-disclosure scenario.
 - **Transaction boundaries.** One explicit transaction per file attempt: `begin()` on
   entry, staging of events/errors inside it, `stage_file_stats` + `commit()` on success;
   the `("rollback", None)` marker triggers `rollback()` + a fresh `begin()` for the
