@@ -148,8 +148,15 @@ positives, edge cases: `docs/DETECTION_RULES.md` (authoritative).
 - Python ≥3.12 declared (`pyproject.toml`); local development and full-suite testing
   performed on CPython 3.14.10 (Windows). Python 3.12 execution has not been verified;
   macOS compatibility has not been verified.
-- CI is configured for Ubuntu and Python 3.14 (`.github/workflows/tests.yml`); the
-  first hosted run (`45025411430`) succeeded on push to `main`.
+- CI is configured for Ubuntu and Windows, both on Python 3.14
+  (`.github/workflows/tests.yml`, two jobs). The workflow was upgraded to the
+  Node.js 24-based actions `actions/checkout@v7` and `actions/setup-python@v7`
+  (commit `860162b`); Python 3.14 configuration and both test commands are
+  unchanged. The first hosted run (`45025411430`, Ubuntu) succeeded on push to
+  `main`; after the FR-162 staged-path remediation, run `45070480433` passed on
+  both Ubuntu and Windows; after the Node.js 24 action upgrade, run
+  `45071870277` passed on both Ubuntu and Windows. (Deprecation-warning
+  disappearance was not independently verified from the run annotations.)
 - Standard-library-only runtime; `unittest` for tests.
 - Per-IP detection state and some evidence collections can grow with input volume;
   constant-memory operation is **not** claimed. The memory test measures **traced

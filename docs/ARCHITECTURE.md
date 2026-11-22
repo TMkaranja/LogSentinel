@@ -458,11 +458,16 @@ Two channels, never mixed (AR-012):
 1. **Data channel (normal mode).** Recoverable problems — bad line, unreadable file,
    oversized file, discovery failure — become `ErrorEntry` records. The `reason` text
    is sanitized at `ErrorEntry` construction (M6, best-effort credential redaction:
-   recognized key/value and Authorization-header patterns are replaced with
+   recognized key/value and credential-header patterns are replaced with
    `<REDACTED>`; the key vocabulary covers `password`, `passwd`, `pwd`,
    `token` (incl. compounds), `api_key`, `secret`, `authorization`,
-   `access_key`, `private_key`, `session_key`, and `credential`/`credentials`
-   (R5 narrow extension); unrecognized secret formats are not detected —
+   `access_key`, `private_key`, `session_key`, `credential`/`credentials`
+   (R5 narrow extension), and — second R5 narrow extension (commit `0280615`)
+   — `sess`/`session`/`sessionid`/`session_id`, `passphrase`,
+   `pass_word`/`pass-word`, and `signature`; credential-bearing headers
+   `Authorization`, `Cookie`, `Set-Cookie`, and `Proxy-Authentication`
+   (hyphen and underscore forms) redact their entire remainder; unrecognized
+   secret formats are not detected —
    security audit finding R5), so the staged `errors` table and the reports never receive unsanitized
    diagnostic text. In the streaming
    pipeline they are staged in the SQLite `errors` table in arrival order (discovery
@@ -640,6 +645,25 @@ Authorized security remediations, recorded in full in `docs/SECURITY_AUDIT.md`:
   retry (it is not tied to any transaction), so fingerprints computed before and
   after a rollback are comparable. This documents application behaviour only; no
   protection is claimed against every possible memory-disclosure scenario.
+- **Staged HTTP-path redaction (FR-162; commit `259ca94`).** A parsed HTTP
+  event's `path` field can itself be credential-bearing (e.g.
+  `/login?password=secret`). Before the `path` column is persisted in SQLite,
+  it passes through the existing shared `events.py` redaction (`_redact()`,
+  the same single implementation used for evidence — no second vocabulary),
+  which protects recognized credential patterns in staged HTTP paths
+  (`password=`, `token=`, cookie/Authorization headers, and the other approved
+  key families). The redaction-only step is applied — the evidence-length cap
+  is not applied to parsed paths — and only to the persisted column: the
+  original in-memory event remains unchanged, preserving detector behaviour,
+  and the original raw-line HMAC fingerprint calculation (over the exact
+  identity `(kind, timestamp, raw_line)`) remains unchanged. Ordinary
+  non-sensitive HTTP paths and non-sensitive query parameters, usernames, addresses, ports,
+  timestamps, and source-file information are preserved byte-identically.
+  The redaction is pattern-based and does not guarantee protection against
+  unknown secret formats, and other parsed fields (`username`,
+  `source_file`, addresses) are not sanitized — the staged-path change is
+  remediation for recognized credential patterns, not full FR-162 compliance
+  (see docs/SECURITY_AUDIT.md §4).
 - **Cleanup locks (R1).** A persistent global cleanup lock file
   (`<system temp dir>/logsentinel-cleanup.lock`) serializes owned-directory
   creation, sweeping, and teardown; the file is never removed. Each owned run

@@ -244,12 +244,19 @@ Evidence excerpts and error text are capped at 256 characters (with a
 truncation marker). Before truncation, credential-bearing key/value pairs
 whose key contains `password`, `passwd`, `pwd`, `token`, `api_key`,
 `secret`, `authorization`, `access_key`/`access-key`,
-`private_key`/`private-key`, `session_key`/`session-key`, `credential`, or
-`credentials` (case-insensitive, hyphen/underscore separators and
-separator-free forms recognized) are replaced with a fixed marker.
+`private_key`/`private-key`, `session_key`/`session-key`, `credential`,
+`credentials`, `sess`/`session`/`sessionid`/`session_id`, `passphrase`,
+`pass_word`/`pass-word`, or `signature` (case-insensitive,
+hyphen/underscore separators and separator-free forms recognized) are
+replaced with a fixed marker. Credential-bearing headers — `Authorization`,
+`Cookie`, `Set-Cookie`, and `Proxy-Authentication` (hyphen and underscore
+forms) — have their entire remainder replaced with the marker, since
+header values are opaque (scheme plus credentials or session identifiers).
 **This redaction is best-effort, not universal secret detection:**
 secrets in formats the matcher does not recognize (e.g. bare tokens without
-a `key=value` shape), unknown key names, unusual separators, multiline
+a `key=value` shape, bare Basic-auth/base64 credentials outside a
+recognized header, unkeyed JWT material, generic `key` or `pin` field
+names), unknown key names, unusual separators, multiline
 material, and other unrecognized encodings are not detected — the length
 cap is the backstop. The vocabulary is deliberately narrow: ordinary fields
 such as `client_id`, `keyboard`, or `monkey` are never redacted. Do not
