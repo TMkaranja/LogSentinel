@@ -55,8 +55,13 @@ _TRUNCATION_MARK = "… [+{} chars truncated]"
 
 # Compound credential keys (access_token, refresh_token, my_api_key ...)
 # are matched by allowing an arbitrary word prefix before the secret word.
+# R5 (narrow vocabulary extension): explicit key families access_key,
+# private_key, session_key, credential and credentials are added. The
+# alternatives are explicit (no generic ``key`` suffix, no ``client_id``,
+# no ``ssh_key``, no entropy heuristics) so ordinary fields like
+# ``keyboard=layout`` or ``monkey=ordinary`` are never redacted.
 _SECRET_KV = re.compile(
-    r"(?i)(?P<key>\b[\w.-]*?(?:password|passwd|pwd|token|api[_-]?key|secret|authorization)\b)"
+    r"(?i)(?P<key>\b[\w.-]*?(?:password|passwd|pwd|token|api[_-]?key|secret|authorization|access[_-]?key|private[_-]?key|session[_-]?key|credentials?)\b)"
     r"(?P<sep>[\"']?\s*[=:]\s*)"
     r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s&\"']+)"
 )

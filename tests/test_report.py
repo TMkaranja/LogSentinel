@@ -168,13 +168,21 @@ class TestRedactionAndCapping(unittest.TestCase):
         "auth 'token'='quoted'",
         "GET /api?token=T%6Fken%20enc HTTP/1.1",
         "password=a1 token=b2 secret=c3",
+        # R5 narrow vocabulary extension (explicit key families only).
+        "GET /api?access_key=AK1 HTTP/1.1",
+        "private_key=pk-data-42",
+        "session_key=sk-777",
+        "credential=credval9",
+        "auth credentials=credpair8",
     ]
 
     def assert_redacted(self, rendered):
         self.assertIn("<REDACTED>", rendered)
         for secret in ("hunter2", "abc123", "zzz", "rrr", "K1", "K2", "K3",
                        "topsecret", "eyJhbGciOiJIUzI1NiJ9", "T%6Fken",
-                       "quoted", "plain", "b2", "c3", "a1"):
+                       "quoted", "plain", "b2", "c3", "a1",
+                       "AK1", "pk-data-42", "sk-777", "credval9",
+                       "credpair8"):
             self.assertNotIn(secret, rendered)
 
     def test_json_redaction_matrix(self):
@@ -197,6 +205,23 @@ class TestRedactionAndCapping(unittest.TestCase):
         rendered = render_json(findings, stats(), AppConfig(), GENERATED_AT)
         self.assertIn("admin", rendered)      # usernames are not credentials
         self.assertNotIn("<REDACTED>", rendered)
+        # R5 regression: ordinary fields sharing word prefixes with the
+        # extended vocabulary are never redacted.
+        ordinary = [finding(evidence=("client_id=ID123 monkey=ordinary "
+                                      "keyboard=layout",))]
+        excluded = [finding(evidence=("ssh_key=kdata client_id=C9",))]
+        for fixtures, expected in (
+                (ordinary, ("client_id=ID123", "monkey=ordinary",
+                            "keyboard=layout")),
+                (excluded, ("ssh_key=kdata", "client_id=C9"))):
+            for renderer in (
+                    lambda f: render_json(f, stats(), AppConfig(),
+                                          GENERATED_AT),
+                    lambda f: render_console(f, stats(), AppConfig())):
+                rendered = renderer(fixtures)
+                for fragment in expected:
+                    self.assertIn(fragment, rendered)
+                self.assertNotIn("<REDACTED>", rendered)
 
     def test_redaction_before_truncation(self):
         # Secret well inside the cap: marker intact, value gone.

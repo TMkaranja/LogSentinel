@@ -459,8 +459,11 @@ Two channels, never mixed (AR-012):
    oversized file, discovery failure — become `ErrorEntry` records. The `reason` text
    is sanitized at `ErrorEntry` construction (M6, best-effort credential redaction:
    recognized key/value and Authorization-header patterns are replaced with
-   `<REDACTED>`; unrecognized secret formats are not detected — security audit
-   finding R5), so the staged `errors` table and the reports never receive unsanitized
+   `<REDACTED>`; the key vocabulary covers `password`, `passwd`, `pwd`,
+   `token` (incl. compounds), `api_key`, `secret`, `authorization`,
+   `access_key`, `private_key`, `session_key`, and `credential`/`credentials`
+   (R5 narrow extension); unrecognized secret formats are not detected —
+   security audit finding R5), so the staged `errors` table and the reports never receive unsanitized
    diagnostic text. In the streaming
    pipeline they are staged in the SQLite `errors` table in arrival order (discovery
    errors first) rather than accumulated in memory; the report receives the first

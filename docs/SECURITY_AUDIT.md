@@ -31,7 +31,7 @@ detection rule `LS-RULE-002` (port-scan detection).
 | **R2** | Strict-mode stderr leakage | Strict-mode abort messages could expose sensitive tokens embedded in parser diagnostic reasons (e.g. invalid-IP validation errors echo the offending token from the log line). The message is now sanitized before being returned and printed. | **RESOLVED for the identified path** (see §3) |
 | **R3** | Unexpected exception output | The unexpected-failure diagnostic (exit code 3) printed the raw exception message to stderr; that text could expose log-derived content in arbitrary failure cases. The message is now sanitized (best-effort, single shared sanitizer) before printing; the exception class name, short-diagnostic behaviour and exit code 3 are unchanged. | **RESOLVED for the identified output path** (best-effort limitations apply — see §4) |
 | **R4** | Source-path redaction | Source paths appeared in externally visible error outputs (JSON error entries length-capped but not redacted; strict-mode abort diagnostics echoed the full uncapped path); a credential-shaped path name or OS username could survive into the output. Output paths are now replaced with the neutral marker `[REDACTED_PATH]`. | **RESOLVED for externally visible outputs** (source paths remain internally and in temporary storage — see §4) |
-| **R5** | Redaction bypass limitations | The existing redaction is best-effort: it matches credential-shaped key/value pairs and Authorization headers only. It cannot guarantee detection of every secret format or encoding (bare tokens, unrecognized key names, separator variations, multi-line secrets, non-percent encodings). This is a documented design limitation, not a defect introduced by the R2 fix. | **OPEN** |
+| **R5** | Redaction bypass limitations | The redaction is best-effort: it matches credential-shaped key/value pairs and Authorization headers only. A narrow authorized vocabulary extension added the explicit key families `access_key`, `private_key`, `session_key`, `credential`/`credentials`; it cannot guarantee detection of every secret format or encoding (bare tokens, unrecognized key names, separator variations, multi-line secrets, non-percent encodings). This is a documented design limitation, not a defect introduced by the R2 fix. | **OPEN** (vocabulary gap for the added families resolved; broader limitations remain) |
 
 No findings beyond R1–R5 are recorded here, and the open findings have not been
 fixed.
@@ -155,10 +155,22 @@ fixed.
   source paths are still retained internally, staged in the temporary SQLite
   database, and (as with any temporary file) can survive abnormal termination;
   at-rest source-path exposure is not eliminated.
-- **R5 (OPEN):** best-effort redaction misses unkeyed secrets, unknown key
-  vocabularies, unusual separators, multi-line secrets, and non-percent
-  encodings. Closing R5 fully is a significant design change; the current
-  behaviour is documented in docs/USAGE.md §8.4 and docs/ARCHITECTURE.md §5.
+- **R5 (OPEN — narrowed, not closed):** the shared `_SECRET_KV` key
+  vocabulary was extended (authorized narrow extension) to also recognize the
+  explicit key families `access_key`/`access-key`, `private_key`/`private-key`,
+  `session_key`/`session-key` (including separator-free forms such as
+  `accesskey`), and `credential`/`credentials` — case-insensitive, with the
+  same separator and value shapes as before; existing key names are unchanged,
+  and ordinary fields sharing word prefixes (`client_id`, `keyboard`,
+  `monkey`) are not redacted (regression-tested). This resolves the specific
+  vocabulary gap for those families **only**. The broader detection
+  limitations remain and R5 stays open: best-effort redaction still misses
+  unkeyed/bare secrets, unknown key vocabularies, unusual separators,
+  multi-line secrets, and non-percent encodings; no entropy heuristics,
+  generic `key` suffix, `ssh_key`, `client_id` matching, or multiline
+  PEM detection were added (explicitly out of scope). Closing R5 fully is a
+  significant design change; the current behaviour is documented in
+  docs/USAGE.md §8.4 and docs/ARCHITECTURE.md §9.
 - **R2's resolution is narrow.** It fixes one identified stderr exposure path.
   It does not make redaction universal, does not change what is stored in
   SQLite staging, and does not satisfy FR-162 or NFR-009 in full.
