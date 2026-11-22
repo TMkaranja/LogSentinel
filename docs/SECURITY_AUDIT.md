@@ -1,7 +1,7 @@
 # LogSentinel — Security Audit and Remediation Record
 
 - **Document:** SECURITY_AUDIT.md
-- **Status:** findings R1–R5 recorded; R2, M6, and M1 remediations verified and committed
+- **Status:** findings R1–R5 recorded; R2, M6, and M1 remediations verified and committed; FR-162 staged-path remediation verified and committed
 - **Related requirements:** FR-162 and NFR-009 (docs/REQUIREMENTS.md §14/§15)
 
 ## 1. Audit Scope and Context
@@ -106,9 +106,11 @@ fixed.
   **R1 residual risks (documented, not eliminated):**
   (a) sanitization is best-effort — unrecognized secret formats may
   remain in `evidence_line`; (b) other parsed fields that are still
-  stored — `username`, `path`, `method`, `src_ip`, `dst_ip`, and
-  `source_file` — may themselves contain sensitive information;
-  (c) abnormal termination (kill, power loss) can leave the temporary
+  stored — `username`, `method`, `src_ip`, `dst_ip`, and
+  `source_file` — may themselves contain sensitive information
+  (credential-bearing HTTP paths were the most sensitive of these and
+  are now remediated at staging time — see the FR-162 staged-path
+  remediation below); (c) abnormal termination (kill, power loss) can leave the temporary
   SQLite file behind, containing sanitized evidence, sanitized error
   reasons, parsed fields, and digests; residue can remain until a later
   application initialization sweeps it (see the lifecycle controls
@@ -199,6 +201,45 @@ fixed.
   PEM detection were added (explicitly out of scope). Closing R5 fully is a
   significant design change; the current behaviour is documented in
   docs/USAGE.md §8.4 and docs/ARCHITECTURE.md §9.
+- **FR-162 staged HTTP-path persistence (RESOLVED for recognized
+  credential patterns — commit `259ca94`, "Redact credential-bearing
+  HTTP paths at staging"):** a confirmed at-rest exposure was
+  demonstrated: a parsed HTTP `path` field such as
+  `/login?password=hunter2` was persisted verbatim in the `events`
+  table while the same row's `evidence_line` was sanitized — the
+  credential value remained recoverable from the database.
+  Remediation: `RunStorage.stage_event` now applies the shared
+  `events.py` redaction (`_redact`, the single existing implementation —
+  no second vocabulary) to the persisted `path` column only, so
+  credential-bearing values in recognized key families
+  (`password=`, `token=`, `api_key=`, `session_id=`, cookie/Authorization
+  headers, and the other approved patterns) are replaced with
+  `<REDACTED>` before SQLite persistence. The evidence-length cap is
+  deliberately NOT applied to parsed paths (redaction only). The
+  in-memory event object is never mutated, so detectors observe the
+  original path; the per-run HMAC fingerprint continues to be computed
+  over the original unsanitized `(kind, timestamp, raw_line)` identity;
+  deduplication, UTF-8 rollback/retry, replay reconstruction, and report
+  output are unchanged. The SQLite schema and docs/REQUIREMENTS.md were
+  not modified. Ordinary paths, query parameters, usernames, IP
+  addresses, ports, timestamps, and source-file information are
+  preserved byte-identically unless they contain a recognized
+  credential-bearing value. Evidence: `tests/test_storage.py`
+  (`TestStagedPathRedaction`, 7 regression tests — redaction of
+  credential values in staged paths, ordinary-path preservation, no
+  evidence cap on parsed paths, in-memory event non-mutation, ordinary
+  SSH usernames unchanged, replay round-trip, and dedup/fingerprint
+  over the original line); full local suite at the change: **416 tests,
+  OK, 10 skipped, zero failures** (canonical command
+  `python -W error::ResourceWarning -m unittest discover`); hosted
+  GitHub Actions run `45070480433` — Ubuntu/Python 3.14 and
+  Windows/Python 3.14 both passed. **Limitations (unchanged):** the
+  redaction is pattern-based and recognizes only the approved
+  vocabulary; unrecognized secret formats inside a `path` value are
+  still persisted, and the remaining stored parsed fields (`username`,
+  `source_file`, and address/port fields) are not sanitized. This
+  remediation therefore does not claim universal credential protection
+  or complete literal compliance with every part of FR-162.
 - **R2's resolution is narrow.** It fixes one identified stderr exposure path.
   It does not make redaction universal, does not change what is stored in
   SQLite staging, and does not satisfy FR-162 or NFR-009 in full.
@@ -216,10 +257,17 @@ fixed.
   subsequent owned initializations. Abnormal-termination residue can still
   persist until a later initialization sweeps it, and cleanup cannot be
   guaranteed if the application never runs again or filesystem/OS failures
-  prevent deletion; at-rest parsed fields and unrecognized secret formats
-  remain as described in §4.
+  prevent deletion; at-rest parsed fields other than HTTP paths (which are
+  now redacted at staging for recognized credential patterns — commit
+  `259ca94`) and unrecognized secret formats remain as described in §4.
 - **FR-162 and NFR-009 must not be described as fully satisfied** while the
-  documented gaps (R5, and R1's residual risks) remain unresolved. The accurate public
+  documented gaps (R5, and R1's residual risks) remain unresolved. The staged
+  HTTP-path persistence issue is remediated for recognized credential
+  patterns, but redaction is pattern-based: it cannot guarantee detection of
+  unknown secret formats, and credential-bearing values in unrecognized
+  vocabularies can still be stored in evidence and parsed fields. No claim
+  of universal credential protection or complete literal FR-162 compliance
+  is made. The accurate public
   position — already stated in docs/USAGE.md §8.4 and docs/ARCHITECTURE.md §5 —
   is that redaction is best-effort and users should not feed secret-bearing
   logs to tools they do not trust.
