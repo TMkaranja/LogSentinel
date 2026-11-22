@@ -1,5 +1,7 @@
 """Unit and integration tests for SQLite-backed staging (Phase 5, spec 3.11)."""
 
+import hashlib
+import hmac
 import os
 import sqlite3
 import tempfile
@@ -15,8 +17,13 @@ from logsentinel.events import (
     HTTPRequestEvent,
     SSHAuthEvent,
     SyslogEvent,
+    _sanitize,
 )
-from logsentinel.storage import MAX_REPORTED_ERRORS_STORAGE, RunStorage
+from logsentinel.storage import (
+    MAX_REPORTED_ERRORS_STORAGE,
+    RunStorage,
+    _event_fingerprint,
+)
 
 
 def ssh(ts=100, line="ssh-line-a", source="a.log", ip="192.0.2.7",
@@ -461,6 +468,188 @@ class TestFingerprintSeen(StorageTestCase):
             self.assertTrue(store.fingerprint_seen(
                 ssh(ts=10, line="L", source="A")))
             store.rollback()
+
+
+class TestHmacFingerprints(StorageTestCase):
+    """M1: per-run HMAC fingerprints and sanitized evidence at rest."""
+
+    KEY = b"\x01" * 32
+
+    def test_schema_has_evidence_and_digest_no_raw_line(self):
+        with self.storage() as store:
+            cols = [r[1] for r in store._conn.execute(
+                "PRAGMA table_info(events)")]
+            self.assertIn("evidence_line", cols)
+            self.assertIn("fp_digest", cols)
+            self.assertNotIn("raw_line", cols)
+            indexes = {r[1]: r[2] for r in store._conn.execute(
+                "PRAGMA index_list(events)")}
+            self.assertIn("idx_events_fp", indexes)
+            sql = store._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name='idx_events_fp'"
+            ).fetchone()[0]
+            self.assertIn("fp_digest", sql)
+            self.assertNotIn("raw_line", sql)
+
+    def test_no_raw_line_column_in_any_statement(self):
+        # Every CREATE statement and index is free of a raw_line reference.
+        with self.storage() as store:
+            for (sql,) in store._conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL"):
+                self.assertNotIn("raw_line", sql)
+
+    def test_staging_stores_digest_and_sanitized_evidence(self):
+        with self.storage() as store:
+            event = ssh(ts=10, line="Failed password token=abc123",
+                        source="A")
+            original_line = event.raw_line
+            store.stage_event(event)
+            row = store._conn.execute(
+                "SELECT evidence_line, fp_digest FROM events").fetchone()
+            self.assertIn("<REDACTED>", row[0])
+            self.assertNotIn("abc123", row[0])
+            self.assertEqual(len(row[1]), 32)
+            self.assertIsInstance(row[1], bytes)
+            # The caller's event object is not mutated.
+            self.assertEqual(event.raw_line, original_line)
+            # The original plaintext never reached the database file.
+            with open(store.path, "rb") as handle:
+                db_bytes = handle.read()
+            self.assertNotIn(b"abc123", db_bytes)
+
+    def test_distinct_raw_lines_identical_parsed_fields_distinct(self):
+        with self.storage() as store:
+            first = ssh(ts=10, line="first attempt", source="A")
+            second = ssh(ts=10, line="second attempt", source="A")
+            store.stage_event(first)
+            store.stage_event(second)
+            self.assertFalse(store.fingerprint_seen(
+                ssh(ts=10, line="third attempt", source="A")))
+            events = list(store.iter_events())
+            self.assertEqual(len(events), 2)
+            self.assertEqual(events[0].raw_line, "first attempt")
+            self.assertEqual(events[1].raw_line, "second attempt")
+            digests = store._conn.execute(
+                "SELECT fp_digest FROM events ORDER BY seq").fetchall()
+            self.assertNotEqual(digests[0][0], digests[1][0])
+
+    def test_unambiguous_encoding_adversarial_strings(self):
+        # With length prefixes, these pairs - which collide under naive
+        # delimiter-only concatenation - produce distinct digests.
+        pairs = [
+            # ("web", 12, "a") vs ("web", 1, "2\x1fa"): same joined bytes.
+            (("web", 12, "a"), ("web", 1, "2\x1fa")),
+            # kind/raw_line boundary shift: ("a\x00b", ...) style.
+            (("authfail", 5, "x"), ("authfail\x00", 5, "")),
+        ]
+        for a, b in pairs:
+            da = _event_fingerprint(self.KEY, *a)
+            db = _event_fingerprint(self.KEY, *b)
+            self.assertNotEqual(da, db, f"collision for {a!r} vs {b!r}")
+        # Domain separation: a different domain prefix changes the digest.
+        self.assertNotEqual(
+            _event_fingerprint(self.KEY, "web", 12, "a"),
+            hmac.new(self.KEY, b"other-domain\x00web|12|a",
+                     hashlib.sha256).digest())
+
+    def test_fresh_key_per_instance(self):
+        event = ssh(ts=10, line="L", source="A")
+        with self.storage() as first:
+            first.stage_event(event)
+            d1 = first._conn.execute(
+                "SELECT fp_digest FROM events").fetchone()[0]
+        with self.storage() as second:
+            # A fresh instance knows nothing of the previous run's events.
+            self.assertFalse(second.fingerprint_seen(event))
+            second.stage_event(event)
+            d2 = second._conn.execute(
+                "SELECT fp_digest FROM events").fetchone()[0]
+            # Fresh key: the same event digests differently across runs.
+            self.assertNotEqual(d1, d2)
+
+    def test_same_key_survives_rollback_and_retry(self):
+        event = ssh(ts=10, line="L", source="A")
+        with self.storage() as store:
+            store.begin()
+            store.stage_event(event)
+            d1 = store._conn.execute(
+                "SELECT fp_digest FROM events").fetchone()[0]
+            store.rollback()
+            # UTF-8-retry-style re-attempt: same instance, same key.
+            store.begin()
+            store.stage_event(event)
+            d2 = store._conn.execute(
+                "SELECT fp_digest FROM events").fetchone()[0]
+            store.commit()
+            self.assertEqual(d1, d2)
+            self.assertTrue(store.fingerprint_seen(event))
+
+    def test_key_not_persisted_or_exposed(self):
+        with self.storage() as store:
+            key = store._hmac_key
+            self.assertEqual(len(key), 32)
+            store.stage_event(ssh(ts=10, line="token=abc123", source="A"))
+            with open(store.path, "rb") as handle:
+                db_bytes = handle.read()
+            self.assertNotIn(key, db_bytes)
+            # Neither the key nor derived material leaks through observable
+            # structures (cleanup errors, module state).
+            self.assertEqual(store.cleanup_errors, [])
+            self.assertNotIn(repr(key), repr(store))
+        # The instance state dies with the instance: no module-level key.
+        import logsentinel.storage as storage_module
+        module_keys = [v for v in vars(storage_module).values()
+                       if isinstance(v, bytes) and len(v) == 32]
+        self.assertEqual(module_keys, [])
+
+    def test_reconstructed_events_carry_sanitized_evidence(self):
+        with self.storage() as store:
+            store.stage_event(ssh(ts=10, line="pwd=hunter2 failed",
+                                  source="A"))
+            store.stage_event(ssh(ts=11, line="plain failure", source="A"))
+            events = list(store.iter_events())
+        self.assertEqual(events[0].raw_line, "pwd=<REDACTED> failed")
+        self.assertNotIn("hunter2", events[0].raw_line)
+        # Non-sensitive evidence passes through unchanged.
+        self.assertEqual(events[1].raw_line, "plain failure")
+
+    def test_sanitizer_idempotence_over_corpus(self):
+        from tests.test_report import TestRedactionAndCapping
+        for fixture in TestRedactionAndCapping.FIXTURES:
+            once = _sanitize(fixture)
+            self.assertEqual(once, _sanitize(once), f"not idempotent: {fixture!r}")
+        # Round-trip through storage: staged evidence re-sanitized is stable.
+        with self.storage() as store:
+            store.stage_event(ssh(ts=10, line="Authorization: Bearer tok",
+                                  source="A"))
+            store.stage_event(ssh(ts=11, line="password=p1 secret=s2",
+                                  source="A"))
+            for event in store.iter_events():
+                self.assertEqual(event.raw_line, _sanitize(event.raw_line))
+
+    def test_dedup_uses_digest_partition(self):
+        # Cross-file multiplicity semantics preserved under digest identity.
+        with self.storage() as store:
+            store.stage_event(ssh(ts=10, line="D", source="A"))
+            store.stage_event(ssh(ts=10, line="D", source="A"))
+            store.stage_event(ssh(ts=10, line="D", source="B"))
+            # cap = max single-file count = 2; 3 occurrences -> 1 removed
+            # (the beyond-cap B occurrence; earliest retained).
+            removed = store.dedup_cross_file()
+            self.assertEqual(removed, 1)
+            self.assertEqual(store._conn.execute(
+                "SELECT COUNT(*) FROM events").fetchone()[0], 2)
+        with self.storage() as store:
+            store.stage_event(ssh(ts=10, line="D", source="A"))
+            store.stage_event(ssh(ts=10, line="E", source="A"))
+            store.stage_event(ssh(ts=10, line="D", source="B"))
+            store.stage_event(ssh(ts=10, line="E", source="B"))
+            # Same parsed fields, different raw lines: distinct identities.
+            # Each identity occurs once per file -> cap 1 -> 2 removed
+            # (earliest occurrences retained).
+            self.assertEqual(store.dedup_cross_file(), 2)
+            self.assertEqual(store._conn.execute(
+                "SELECT COUNT(*) FROM events").fetchone()[0], 2)
 
 
 if __name__ == "__main__":
