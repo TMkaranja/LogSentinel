@@ -60,16 +60,22 @@ _TRUNCATION_MARK = "… [+{} chars truncated]"
 # alternatives are explicit (no generic ``key`` suffix, no ``client_id``,
 # no ``ssh_key``, no entropy heuristics) so ordinary fields like
 # ``keyboard=layout`` or ``monkey=ordinary`` are never redacted.
+# R5 (approved narrow fixes): session-identifier keys
+# (sess/session/sessionid/session_id), passphrase, pass_word/pass-word and
+# signature are added as explicit whole-word alternatives.
 _SECRET_KV = re.compile(
-    r"(?i)(?P<key>\b[\w.-]*?(?:password|passwd|pwd|token|api[_-]?key|secret|authorization|access[_-]?key|private[_-]?key|session[_-]?key|credentials?)\b)"
+    r"(?i)(?P<key>\b[\w.-]*?(?:password|passwd|pwd|token|api[_-]?key|secret|authorization|access[_-]?key|private[_-]?key|session[_-]?key|credentials?|sess(?:ion(?:[_-]?id)?)?|passphrase|pass[_-]?word|signature)\b)"
     r"(?P<sep>[\"']?\s*[=:]\s*)"
-    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s&\"']+)"
+    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s&\"']+)",
 )
 
-# Authorization headers: the entire remainder of the line is redacted
-# (scheme plus credentials, e.g. "Authorization: Bearer <jwt>").
+# Credential-bearing headers: the entire remainder of the line is redacted
+# (scheme plus credentials, e.g. "Authorization: Bearer <jwt>"). R5:
+# Cookie, Set-Cookie and Proxy-Authentication (hyphen and underscore
+# forms) are added — their values are session identifiers/credentials and
+# are treated as opaque, exactly like Authorization.
 _AUTH_HEADER = re.compile(
-    r"(?i)(\bauthorization\b[ \t]*[=:][ \t]*).*"
+    r"(?i)(\b(?:authorization|proxy[_-]?authentication|set[_-]?cookie|cookie)\b[ \t]*[=:][ \t]*).*"
 )
 
 

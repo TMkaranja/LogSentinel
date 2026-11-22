@@ -174,6 +174,20 @@ class TestRedactionAndCapping(unittest.TestCase):
         "session_key=sk-777",
         "credential=credval9",
         "auth credentials=credpair8",
+        # R5 approved fixes: session identifiers, passphrase/pass_word,
+        # signature, and credential-bearing headers (opaque values).
+        "session=abcdef123456",
+        "sessionid: xyz789",
+        "sess=zz9876",
+        "GET /api?session_id=qqq321 HTTP/1.1",
+        "passphrase=secretphrase",
+        "auth pass_word=pw00099",
+        "auth pass-word=pw11110",
+        "signature=t0psecret99",
+        "Cookie: session=abcdef123456; Path=/",
+        "Set-Cookie: SESSIONID=xyz789; Path=/",
+        "proxy-authorization: Basic dXNlcjpwYXNz",
+        "proxy_authentication: Basic cHJveHk6cGFzcw==",
     ]
 
     def assert_redacted(self, rendered):
@@ -182,7 +196,10 @@ class TestRedactionAndCapping(unittest.TestCase):
                        "topsecret", "eyJhbGciOiJIUzI1NiJ9", "T%6Fken",
                        "quoted", "plain", "b2", "c3", "a1",
                        "AK1", "pk-data-42", "sk-777", "credval9",
-                       "credpair8"):
+                       "credpair8",
+                       "abcdef123456", "xyz789", "zz9876", "qqq321",
+                       "secretphrase", "pw00099", "pw11110", "t0psecret99",
+                       "dXNlcjpwYXNz", "cHJveHk6cGFzcw=="):
             self.assertNotIn(secret, rendered)
 
     def test_json_redaction_matrix(self):
@@ -198,6 +215,56 @@ class TestRedactionAndCapping(unittest.TestCase):
                 findings = [finding(evidence=(fixture,))]
                 self.assert_redacted(
                     render_console(findings, stats(), AppConfig()))
+
+    def test_header_redaction_families(self):
+        """R5: Cookie/Set-Cookie/Proxy-Authentication headers redact the
+        whole remainder, exactly like Authorization; the Authorization
+        behaviour is unchanged.
+        """
+        for header in ("Cookie: session=abc; Path=/", "Cookie:none",
+                       "Set-Cookie: SESSIONID=xyz; HttpOnly",
+                       "proxy-authorization: Basic abc",
+                       "proxy_authentication: Basic def"):
+            with self.subTest(header=header):
+                rendered = self._render(header)
+                self.assertIn("<REDACTED>", rendered)
+                self.assertNotIn("session=abc", rendered)
+                self.assertNotIn("SESSIONID", rendered)
+                self.assertNotIn("Basic", rendered)
+                self.assertNotIn("abc", rendered.replace("<REDACTED>", ""))
+        # Authorization unchanged.
+        rendered = self._render("Authorization: Bearer eyJ.aaa.bbb")
+        self.assertIn("<REDACTED>", rendered)
+        self.assertNotIn("eyJ", rendered)
+
+    def _render(self, evidence):
+        findings = [finding(evidence=(evidence,))]
+        return render_json(findings, stats(), AppConfig(), GENERATED_AT)
+
+    def test_boundary_and_false_positive_regressions(self):
+        """R5 regressions: compound words that merely contain vocabulary
+        fragments stay unredacted; approved conservative redactions are
+        documented.
+        """
+        must_not_redact = [
+            "account_password_reset=1",     # boundary: reset follows
+            "client_id=ID123",              # excluded by policy
+            "ssh_key=kdata",                # excluded by policy
+            "key=abc123",                   # generic key: excluded
+            "pin=1234",                     # excluded
+            "keyboard=layout",              # ordinary word
+            "monkey=ordinary",              # ordinary word
+            "signature_algorithm=sha256",   # boundary: algorithm follows
+        ]
+        for evidence in must_not_redact:
+            with self.subTest(evidence=evidence):
+                rendered = self._render(evidence)
+                self.assertNotIn("<REDACTED>", rendered)
+                self.assertIn(evidence, rendered)
+        # Documented conservative behaviour: a bare `session=` key value is
+        # redacted even if the value is not a real session identifier.
+        rendered = self._render("session=planning-meeting")
+        self.assertIn("<REDACTED>", rendered)
 
     def test_normal_values_not_redacted(self):
         findings = [finding(evidence=("Failed password for admin from "
