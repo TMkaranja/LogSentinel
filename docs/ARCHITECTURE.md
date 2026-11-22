@@ -640,6 +640,38 @@ Authorized security remediations, recorded in full in `docs/SECURITY_AUDIT.md`:
   retry (it is not tied to any transaction), so fingerprints computed before and
   after a rollback are comparable. This documents application behaviour only; no
   protection is claimed against every possible memory-disclosure scenario.
+- **Cleanup locks (R1).** A persistent global cleanup lock file
+  (`<system temp dir>/logsentinel-cleanup.lock`) serializes owned-directory
+  creation, sweeping, and teardown; the file is never removed. Each owned run
+  directory contains a per-run lock file (`run.lock`) acquired at creation and
+  held for the run's entire lifetime, protecting active runs. Locking uses the
+  standard library: `msvcrt.locking` on Windows and `fcntl.flock` on POSIX, with
+  an explicit seek to byte 0 on Windows and a non-blocking variant (`LK_NBLCK` /
+  `LOCK_EX | LOCK_NB`) used by the sweeper. Caller-supplied directories remain
+  caller-owned: no lock file is created in them and they are never removed.
+- **Stale-directory sweeping (R1).** Owned `RunStorage` initialization sweeps
+  eligible abandoned `logsentinel-run-*` directories **while it already holds
+  the global cleanup lock** (no re-acquisition). A candidate is removed only when
+  all of the following hold, validated at discovery and **revalidated under the
+  global lock and again after a successful per-run lock acquisition**:
+  strictly older than **24 hours** (default threshold, directory mtime basis);
+  contents exclusively the owned-artifact whitelist `staging.sqlite3` and/or
+  `run.lock` (nothing else — empty directories and foreign/malformed content are
+  skipped); and its `run.lock` acquirable **non-blockingly**, protecting active
+  runs. Lock-less stale residue (only `staging.sqlite3` present) is removed
+  conservatively under the same whitelist; a missing `run.lock` is not created
+  by the sweeper (creating it would refresh the directory mtime), and no active
+  run can appear in between because creation holds the global lock. Symlinks,
+  Windows reparse points (junctions), renamed/moved candidates, and anything
+  outside the validated scan root are skipped, never deleted. The Windows per-run
+  lock is **released before `run.lock` is deleted** (an open locked handle
+  prevents deletion). Sweeping never raises; failures (including skipped
+  candidates' removal errors) are collected in `cleanup_errors`.
+- **Residual lifecycle limitation.** Abnormal termination can still leave
+  residue until a later owned initialization sweeps it; cleanup cannot be
+  guaranteed if the application never runs again or filesystem/OS failures
+  prevent deletion. No complete at-rest-protection or guaranteed-cleanup claim
+  is made.
 - **Transaction boundaries.** One explicit transaction per file attempt: `begin()` on
   entry, staging of events/errors inside it, `stage_file_stats` + `commit()` on success;
   the `("rollback", None)` marker triggers `rollback()` + a fresh `begin()` for the

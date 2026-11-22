@@ -33,6 +33,23 @@ Storage design:
   values cannot produce the same digest.
 - Retrieval order is deterministic via the ingestion sequence (FR-111);
   SQLite's implicit row ordering is never relied upon.
+- Cleanup coordination (R1 step): a persistent global cleanup lock file in
+  the system temporary directory serializes teardown of LogSentinel-owned
+  run directories (acquired before creating an owned run directory and
+  during teardown, never held during scanning — concurrent runs remain
+  possible), and each owned run directory contains a per-run lock held for
+  the run's entire lifetime. Locking uses the standard library: ``msvcrt``
+  on Windows and ``fcntl.flock`` on POSIX. Caller-supplied directories are
+  caller-owned: no lock file is created in them and they are never removed.
+- Stale-directory sweeping (R1 step): ``sweep_stale_run_directories``
+  removes LogSentinel-owned ``logsentinel-run-*`` directories strictly
+  older than 24 hours (mtime basis) that can be proven abandoned:
+  recognized artifact content only, ``run.lock`` acquirable
+  non-blockingly (an active run keeps its lock and is never touched),
+  symlinks and foreign/malformed content skipped. Sweeping, directory
+  creation, and teardown all serialize on the global cleanup lock; owned
+  ``RunStorage`` construction sweeps while it already holds that lock
+  (no re-acquisition). Sweep failures are returned, never raised.
 
 This module is leaf-safe: it imports only the standard library and the
 event model (events.py). It never parses, detects, or reports.
@@ -45,10 +62,21 @@ import hmac
 import os
 import secrets
 import sqlite3
+import stat
 import struct
 import tempfile
+import time
 from collections.abc import Iterator
 from typing import Any
+
+try:  # Cross-platform advisory locking (R1 step: cleanup coordination).
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None
 
 from .events import (
     ErrorEntry,
@@ -65,6 +93,330 @@ __all__ = ["RunStorage", "MAX_REPORTED_ERRORS_STORAGE"]
 
 #: The streaming CLI reports at most this many staged error entries.
 MAX_REPORTED_ERRORS_STORAGE = 100
+
+#: Persistent global cleanup lock (never removed) in the system temp dir.
+_GLOBAL_LOCK_FILENAME = "logsentinel-cleanup.lock"
+#: Per-run lock file inside each LogSentinel-owned temporary directory.
+_RUN_LOCK_FILENAME = "run.lock"
+
+
+def _global_cleanup_lock_path() -> str:
+    """Path of the persistent global cleanup lock file."""
+    return os.path.join(tempfile.gettempdir(), _GLOBAL_LOCK_FILENAME)
+
+
+def _lock_fd(handle) -> None:
+    """Acquire a blocking exclusive advisory lock on ``handle``.
+
+    On Windows the lock region is relative to the current file position
+    (``msvcrt.locking`` contract); seek to byte offset zero explicitly so
+    the lock byte is consistent across processes regardless of open mode.
+    """
+    if msvcrt is not None:  # Windows
+        handle.seek(0, 0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+    else:  # POSIX
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _try_lock_fd(handle) -> None:
+    """Acquire a NON-blocking exclusive advisory lock on ``handle``.
+
+    Raises ``OSError`` if the lock is already held. The same explicit
+    seek-to-zero applies on Windows (LK_NBLCK contract).
+    """
+    if msvcrt is not None:  # Windows
+        handle.seek(0, 0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:  # POSIX
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_fd(handle) -> None:
+    """Release the advisory lock on ``handle`` (best-effort)."""
+    try:
+        if msvcrt is not None:  # Windows
+            handle.seek(0, 0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:  # POSIX
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        # Closing the handle also releases the lock; never mask cleanup.
+        pass
+
+
+class _FileLock:
+    """Cross-platform blocking exclusive advisory file lock.
+
+    Standard library only: ``msvcrt.locking`` on Windows, ``fcntl.flock``
+    on POSIX. The lock is held by the open handle; :meth:`release` unlocks
+    and closes it. Acquire is idempotent per instance (a held instance does
+    not re-lock); release of an unheld instance is a no-op.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        self._handle = None
+
+    @property
+    def path(self) -> str:
+        return self._path
+
+    @property
+    def locked(self) -> bool:
+        return self._handle is not None
+
+    def acquire(self) -> None:
+        if self._handle is not None:
+            return
+        handle = open(self._path, "a+b")
+        try:
+            _lock_fd(handle)
+        except BaseException:
+            handle.close()
+            raise
+        self._handle = handle
+
+    def try_acquire(self) -> bool:
+        """Acquire without blocking; ``False`` if the lock is busy.
+
+        On failure the temporary handle is closed so no lock state leaks.
+        """
+        if self._handle is not None:
+            return True  # already held by this instance
+        handle = open(self._path, "a+b")
+        try:
+            _try_lock_fd(handle)
+        except OSError:
+            handle.close()
+            return False
+        except BaseException:
+            handle.close()
+            raise
+        self._handle = handle
+        return True
+
+    def release(self) -> None:
+        if self._handle is None:
+            return
+        handle, self._handle = self._handle, None
+        try:
+            _unlock_fd(handle)
+        finally:
+            handle.close()
+
+
+#: Recognized artifacts inside an owned run directory (R1 sweeper
+#: whitelist). Anything else makes a candidate foreign/malformed and it is
+#: skipped, never deleted.
+_OWNED_ARTIFACTS = frozenset({"staging.sqlite3", _RUN_LOCK_FILENAME})
+
+
+def _sweep_skip_reason(path: str, root_abspath: str,
+                       cutoff: float) -> str | None:
+    """Revalidate one sweep candidate; ``None`` means safe to remove.
+
+    Full identity/safety validation, safe to call both during discovery
+    and again **under the global cleanup lock** immediately before
+    deletion (defence against the directory being replaced, renamed, made
+    recent, or filled with foreign content between the two phases):
+
+    - name must be an exact ``logsentinel-run-*`` candidate;
+    - the path's parent must be exactly the validated scan root
+      (containment; prevents path substitution);
+    - symlinks are rejected via ``os.path.islink`` **and**, on Windows,
+      any reparse point (``FILE_ATTRIBUTE_REPARSE_POINT``), which also
+      covers junctions that ``islink`` does not report;
+    - the entry must be a real directory (``follow_symlinks=False``);
+    - it must be strictly older than the age cutoff (recomputed mtime);
+    - contents must be a non-empty subset of the recognized artifact
+      names, and every entry must be a regular file (no subdirectories,
+      no symlinks, nothing unknown). Empty directories are rejected.
+
+    Portable-limitation note: reparse points are detectable only on
+    Windows; on POSIX, ``islink`` covers symlinks, but bind mounts over
+    the scan root cannot be detected portably - the root-containment and
+    content checks are the residual defence.
+    """
+    name = os.path.basename(path)
+    if not name.startswith("logsentinel-run-"):
+        return f"sweep skip {path}: unexpected name"
+    parent = os.path.normcase(os.path.dirname(os.path.abspath(path)))
+    if parent != root_abspath:
+        return f"sweep skip {path}: outside scan root"
+    if os.path.islink(path):
+        return f"sweep skip {path}: symlink"
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return f"sweep skip {path}: stat failed"
+    reparse = getattr(st, "st_file_attributes", 0)
+    if reparse & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        return f"sweep skip {path}: reparse point (junction/symlink)"
+    if not stat.S_ISDIR(st.st_mode):
+        return f"sweep skip {path}: not a directory"
+    if st.st_mtime > cutoff:  # strictly older than the age limit
+        return f"sweep skip {path}: no longer stale"
+    try:
+        entries = os.listdir(path)
+    except OSError:
+        return f"sweep skip {path}: listdir failed"
+    if not entries:
+        return f"sweep skip {path}: empty directory"
+    for item in entries:
+        if item not in _OWNED_ARTIFACTS:
+            return f"sweep skip {path}: foreign content {item!r}"
+        item_path = os.path.join(path, item)
+        if os.path.islink(item_path):
+            return f"sweep skip {path}: entry symlink {item!r}"
+        try:
+            item_st = os.stat(item_path, follow_symlinks=False)
+        except OSError:
+            return f"sweep skip {path}: entry stat failed {item!r}"
+        if not stat.S_ISREG(item_st.st_mode):
+            return f"sweep skip {path}: entry not a regular file {item!r}"
+    return None
+
+
+def sweep_stale_run_directories(
+        root: str | None = None, *, now: float | None = None,
+        max_age_seconds: float = 86400.0,
+        assume_global_lock_held: bool = False) -> list[str]:
+    """Remove abandoned LogSentinel-owned temporary run directories.
+
+    A candidate is a **direct child** of ``root`` (never recursed) whose
+    name starts exactly with ``logsentinel-run-`` and which is a real
+    directory (symlinks are rejected). A candidate is removed only when
+    ALL of the following hold:
+
+    - it is strictly older than ``max_age_seconds`` (24 hours by default),
+      based on ``mtime`` (``now`` is injectable for deterministic tests);
+    - its contents are exclusively recognized LogSentinel artifacts
+      (``staging.sqlite3`` and/or ``run.lock``) - foreign, malformed, or
+      unknown content makes it skipped, never deleted;
+    - its ``run.lock`` can be acquired NON-blockingly - an active run
+      keeps its lock and is never touched (lock-less stale residue is
+      removed, conservatively, only under the content whitelist above).
+    - full identity/safety revalidation (name, root containment, symlink
+      and reparse-point status, directory type, recalculated age, and
+      content whitelist incl. regular-file checks) is repeated **under
+      the global cleanup lock** immediately before deletion; empty
+      directories are rejected.
+
+    The removal phase runs under the persistent global cleanup lock,
+    serializing with directory creation and teardown. When
+    ``assume_global_lock_held`` is true (owned ``RunStorage`` construction
+    already holds it), the caller's hold is used and no re-acquisition or
+    extra release happens - a held ``_FileLock.acquire`` is a no-op, but
+    the sweeper must not release a lock it did not take.
+
+    Returns human-readable failure descriptions; never raises. The global
+    lock file itself is never removed.
+    """
+    failures: list[str] = []
+    if root is None:
+        root = tempfile.gettempdir()
+    if now is None:
+        now = time.time()
+    cutoff = now - max_age_seconds
+    try:
+        entries = list(os.scandir(root))
+    except OSError as exc:
+        return [f"sweep scan {root}: {exc}"]
+    candidates: list[str] = []
+    for entry in entries:
+        if not entry.name.startswith("logsentinel-run-"):
+            continue
+        try:
+            if entry.is_symlink():
+                continue
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            mtime = entry.stat(follow_symlinks=False).st_mtime
+        except OSError:
+            continue  # unreadable entry: skip, never delete
+        if mtime > cutoff:  # strictly older than max_age required
+            continue
+        candidates.append(entry.path)
+    if not candidates:
+        return failures
+    root_abspath = os.path.normcase(os.path.abspath(root))
+    sweep_lock = None
+    if not assume_global_lock_held:
+        sweep_lock = _FileLock(_global_cleanup_lock_path())
+        try:
+            sweep_lock.acquire()
+        except OSError as exc:
+            return failures + [f"sweep global lock: {exc}"]
+    try:
+        for path in candidates:
+            # Revalidate EVERYTHING under the global lock: identity, type,
+            # symlink/reparse status, root containment, recalculated age,
+            # and content whitelist. Replacement, renames, symlink swaps,
+            # recentification, or foreign content between discovery and
+            # deletion make the candidate skipped, never deleted.
+            skip_reason = _sweep_skip_reason(path, root_abspath, cutoff)
+            if skip_reason is not None:
+                continue
+            db_path = os.path.join(path, "staging.sqlite3")
+            lock_file = os.path.join(path, _RUN_LOCK_FILENAME)
+            run_lock = None
+            if os.path.lexists(lock_file):
+                run_lock = _FileLock(lock_file)
+                try:
+                    acquired = run_lock.try_acquire()
+                except OSError as exc:
+                    # Opening/acquiring the run lock failed (e.g.
+                    # PermissionError): the lock state cannot be verified,
+                    # so the candidate is NEVER deleted. Preserve the
+                    # directory and all contents; report the failure.
+                    failures.append(f"sweep run-lock {lock_file}: {exc}")
+                    run_lock = None
+                    continue
+                if not acquired:
+                    continue  # active run: never touched
+            # NOTE: a missing run.lock is probed by NOT creating it -
+            # creating the file here would refresh the directory mtime and
+            # defeat the age revalidation below. This is race-free: run
+            # creation also holds the global cleanup lock, so no active
+            # run can appear between the check and the deletion.
+            # Second full revalidation AFTER the per-run lock was taken
+            # (when it existed) and BEFORE the first destructive
+            # operation: state may have changed while the probe ran. On a
+            # skip reason nothing is deleted and any held per-run lock is
+            # released immediately.
+            skip_reason = _sweep_skip_reason(path, root_abspath, cutoff)
+            if skip_reason is not None:
+                if run_lock is not None:
+                    run_lock.release()
+                continue
+            try:
+                try:
+                    os.remove(db_path)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    failures.append(f"sweep database {db_path}: {exc}")
+            finally:
+                # Release before removing the lock file: on Windows an
+                # open locked handle prevents deletion.
+                if run_lock is not None:
+                    run_lock.release()
+            try:
+                os.remove(lock_file)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                failures.append(f"sweep run-lock {lock_file}: {exc}")
+            try:
+                os.rmdir(path)
+            except OSError as exc:
+                failures.append(f"sweep directory {path}: {exc}")
+    finally:
+        if sweep_lock is not None:
+            sweep_lock.release()
+    return failures
+
 
 #: Domain separation prefix for the per-run fingerprint digest (M1).
 _FP_DOMAIN = b"LogSentinel:event-fingerprint:v1\x00"
@@ -154,21 +506,55 @@ class RunStorage:
 
     def __init__(self, directory: str | None = None) -> None:
         self._owns_dir = directory is None
-        self._dir = directory or tempfile.mkdtemp(prefix="logsentinel-run-")
-        self._path = os.path.join(self._dir, "staging.sqlite3")
+        self._dir = None
+        self._path = None
         #: Descriptions of cleanup steps that failed (never raised): leaks
         #: stay observable instead of being silently swallowed, while the
         #: original application exception is preserved.
         self.cleanup_errors: list[str] = []
         self._conn: sqlite3.Connection | None = None
         self._closed = False
+        # R1 retryability: set once destructive cleanup has been attempted
+        # under the global lock; close() marks the instance closed only
+        # after this flag is set (a global-lock failure leaves the instance
+        # retryable).
+        self._cleanup_complete = False
         # M1 (security audit R1): one fresh random key per RunStorage
         # instance, held exclusively in memory for the instance lifetime.
         # Never persisted, logged, reported, or exposed; regenerated by
         # every new instance. The same key is used across transaction
         # rollback and UTF-8 retry (it is not tied to any transaction).
         self._hmac_key = secrets.token_bytes(32)
+        # R1 step (cleanup coordination): the persistent global cleanup
+        # lock serializes owned-directory creation and teardown. It is NOT
+        # held during scanning, so concurrent runs remain possible.
+        self._global_lock = _FileLock(_global_cleanup_lock_path())
+        self._run_lock: _FileLock | None = None
         try:
+            if self._owns_dir:
+                # Global lock held only while creating the owned run
+                # directory and taking the per-run lock.
+                self._global_lock.acquire()
+                try:
+                    self._dir = tempfile.mkdtemp(prefix="logsentinel-run-")
+                    self._run_lock = _FileLock(
+                        os.path.join(self._dir, _RUN_LOCK_FILENAME))
+                    self._run_lock.acquire()  # held for the entire run
+                    # R1 step: sweep abandoned residue while the global
+                    # cleanup lock is already held (no re-acquisition); the
+                    # fresh run directory is minutes old and its lock is
+                    # held, so it can never be a sweep target. Sweeping
+                    # never raises; failures are recorded below.
+                    self.cleanup_errors.extend(
+                        sweep_stale_run_directories(
+                            assume_global_lock_held=True))
+                finally:
+                    self._global_lock.release()
+            else:
+                # Caller-supplied directories are caller-owned: no lock
+                # file is created inside them.
+                self._dir = directory
+            self._path = os.path.join(self._dir, "staging.sqlite3")
             # Explicit transaction control: BEGIN/COMMIT/ROLLBACK by the
             # caller.
             self._conn = sqlite3.connect(self._path, isolation_level=None)
@@ -179,10 +565,11 @@ class RunStorage:
             self._conn.execute("PRAGMA synchronous=OFF")
             self._conn.executescript(_SCHEMA)
         except BaseException:
-            # Constructor failure after temp-dir creation (connect, PRAGMA,
-            # or schema failure): dispose of every partially created
+            # Constructor failure (owned-directory or lock handling, connect,
+            # PRAGMA, or schema failure): dispose of every partially created
             # resource, record any removal failure, and re-raise the
-            # original exception (spec 3 of the Phase 5 corrections).
+            # original exception (spec 3 of the Phase 5 corrections). A
+            # single handler guarantees _dispose() runs exactly once.
             self.cleanup_errors.extend(self._dispose())
             raise
 
@@ -199,7 +586,14 @@ class RunStorage:
         Returns human-readable descriptions of every removal step that
         failed; never raises (cleanup failures must not mask the original
         application exception). Removal targets only this instance's own
-        database file and, when owned, its temporary directory.
+        database file and, when owned, its temporary directory. Teardown
+        runs under the persistent global cleanup lock; the per-run lock is
+        released and its lock file removed before the owned directory is
+        removed. The global lock file itself is persistent and never
+        removed. If the global lock cannot be acquired, **no destructive
+        cleanup is performed**: the database, per-run lock, and owned
+        directory are preserved (observable via ``cleanup_errors``) so the
+        run is never treated as unprotected.
         """
         failures: list[str] = []
         if self._conn is not None:
@@ -209,28 +603,66 @@ class RunStorage:
                 failures.append(f"connection close: {exc}")
             self._conn = None
         try:
-            os.remove(self._path)
-        except FileNotFoundError:
-            pass
+            self._global_lock.acquire()
         except OSError as exc:
-            failures.append(f"database removal {self._path}: {exc}")
-        if self._owns_dir:
-            try:
-                os.rmdir(self._dir)
-            except OSError as exc:
-                failures.append(f"directory removal {self._dir}: {exc}")
+            # Without the global cleanup lock, destructive cleanup must NOT
+            # proceed: the per-run lock and directory are preserved so the
+            # run is not treated as unprotected (and a future stale-directory
+            # sweeper does not race a live run). The failure is observable
+            # in ``cleanup_errors``; the original application exception (if
+            # any) is not masked.
+            failures.append(f"global cleanup lock: {exc}")
+            return failures
+        # From here the destructive cleanup is (being) performed under the
+        # global lock: close() may mark the instance closed regardless of
+        # individual step failures (they are recorded in cleanup_errors).
+        self._cleanup_complete = True
+        try:
+            if self._path is not None:
+                try:
+                    os.remove(self._path)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    failures.append(f"database removal {self._path}: {exc}")
+            if self._owns_dir and self._dir is not None:
+                if self._run_lock is not None:
+                    # Release before removing the lock file: on Windows an
+                    # open locked handle prevents deletion.
+                    self._run_lock.release()
+                lock_file = os.path.join(self._dir, _RUN_LOCK_FILENAME)
+                try:
+                    os.remove(lock_file)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    failures.append(
+                        f"run-lock removal {self._dir}: {exc}")
+                try:
+                    os.rmdir(self._dir)
+                except OSError as exc:
+                    failures.append(f"directory removal {self._dir}: {exc}")
+        finally:
+            self._global_lock.release()
+        self._run_lock = None
         return failures
 
     def close(self) -> None:
         """Close the connection and delete the database file.
 
         Removal failures are recorded in ``cleanup_errors`` for
-        observability; they never mask the flow's own outcome.
+        observability; they never mask the flow's own outcome. If global
+        cleanup-lock acquisition fails, destructive cleanup is skipped and
+        the instance stays retryable: a later :meth:`close` can complete
+        the cleanup once the lock becomes available. After a completed
+        cleanup the instance is marked closed and further calls are
+        no-ops.
         """
         if self._closed:
             return
-        self._closed = True
         self.cleanup_errors.extend(self._dispose())
+        if self._cleanup_complete:
+            self._closed = True
 
     def __enter__(self) -> "RunStorage":
         return self

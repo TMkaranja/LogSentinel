@@ -110,8 +110,11 @@ fixed.
   `source_file` — may themselves contain sensitive information;
   (c) abnormal termination (kill, power loss) can leave the temporary
   SQLite file behind, containing sanitized evidence, sanitized error
-  reasons, parsed fields, and digests; (d) HMAC-SHA256 carries a
-  theoretical collision risk — within practical keyed-collision
+  reasons, parsed fields, and digests; residue can remain until a later
+  application initialization sweeps it (see the lifecycle controls
+  below), and cleanup cannot be guaranteed if the application never runs
+  again or filesystem/OS failures prevent deletion; (d) HMAC-SHA256
+  carries a theoretical collision risk — within practical keyed-collision
   resistance, digest equality stands in for exact identity, and the
   per-run key prevents straightforward fingerprint matching across runs,
   but does not prevent identification through other stored database
@@ -122,6 +125,31 @@ fixed.
   credential-bearing fields are never stored — is not demonstrated,
   because unrecognized secret formats and other parsed fields can still
   be persisted in sanitized or parsed form.
+
+  **R1 lifecycle controls (implemented after the storage change above; a
+  separate, safer lifecycle-coordination step — this is distinct from the
+  M1 data change and does not by itself address evidence sanitization):**
+  - a **persistent global cleanup lock** (`<system temp
+    dir>/logsentinel-cleanup.lock`, never removed) serializes owned
+    directory creation, sweeping, and teardown;
+  - each owned run directory contains a **per-run lock** (`run.lock`)
+    held for the run's entire lifetime, protecting active owned runs;
+  - every subsequent owned `RunStorage` initialization **sweeps eligible
+    abandoned directories**: candidates are `logsentinel-run-*`
+    directories strictly older than **24 hours** (directory mtime basis)
+    whose contents are exclusively recognized LogSentinel artifacts;
+  - the sweeper uses **non-blocking** run-lock acquisition (an active run
+    keeps its lock and is never touched), revalidates each candidate
+    under the global lock and again after per-run lock acquisition, and
+    removes only directories containing recognized artifacts
+    (`staging.sqlite3` and/or `run.lock`);
+  - foreign or malformed contents, symlinks, and Windows reparse points
+    (junctions) are skipped, never deleted;
+  - cleanup failures (including global-lock acquisition failures, which
+    skip destructive cleanup and leave the instance retryable) remain
+    observable in `cleanup_errors`. Tests: `tests/test_storage.py`
+    (`TestCleanupLocks`, `TestStaleSweeper` — locking, contention,
+    retryability, sweeper gating and path-safety coverage).
 - **R3 (RESOLVED for the identified output path):** the outermost CLI
   exception boundary (`cli.py`, `except Exception` arm) now applies the single
   shared sanitizer (`_sanitize`) to the exception message text before printing
@@ -180,6 +208,16 @@ fixed.
 - Best-effort redaction is **not a guarantee of complete secret protection**.
   The length cap is a backstop, not a security boundary: a 256-character
   evidence cap does not ensure that secrets cannot leak.
+- **R1 at-rest exposure is reduced, not eliminated.** The M1 data change
+  (sanitized evidence, per-run HMAC fingerprints) is complemented by R1
+  lifecycle controls: a persistent global cleanup lock serializing creation,
+  sweeping, and teardown; per-run locks protecting active runs; and automatic
+  sweeping of abandoned owned directories older than 24 hours (mtime) during
+  subsequent owned initializations. Abnormal-termination residue can still
+  persist until a later initialization sweeps it, and cleanup cannot be
+  guaranteed if the application never runs again or filesystem/OS failures
+  prevent deletion; at-rest parsed fields and unrecognized secret formats
+  remain as described in §4.
 - **FR-162 and NFR-009 must not be described as fully satisfied** while the
   documented gaps (R5, and R1's residual risks) remain unresolved. The accurate public
   position — already stated in docs/USAGE.md §8.4 and docs/ARCHITECTURE.md §5 —
