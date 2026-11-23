@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<defs>
+  <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="CURRENT_START"/>
+    <stop offset="1" stop-color="CURRENT_END"/>
+  </linearGradient>
+</defs>
+<rect x="3" y="3" width="58" height="58" rx="15" fill="url(#tile)"
+      stroke="CURRENT_BORDER" stroke-width="1.2"/>
+<path d="M15 33c4-9 13-14 17-14s13 5 17 14c-4 9-13 14-17 14S19 42 15 33Z"
+      fill="CURRENT_FOREGROUND" opacity="0.96"/>
+<circle cx="32" cy="33" r="6" fill="CURRENT_PUPIL"/>
+<circle cx="34" cy="31" r="1.6" fill="CURRENT_FOREGROUND" opacity="0.8"/>
+<path d="M32 11v5M32 47v5M11 33h5M48 33h5"
+      stroke="CURRENT_FOREGROUND" stroke-width="2" stroke-linecap="round"
+      opacity="0.55"/>
+<path d="M20 51c4 2 20 2 24 0" fill="none" stroke="CURRENT_FOREGROUND"
+      stroke-width="1.6" stroke-linecap="round" opacity="0.4"/>
+</svg>

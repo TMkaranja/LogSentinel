@@ -1,0 +1,138 @@
+# -*- mode: python ; coding: utf-8 -*-
+"""One-file, windowed PyInstaller specification for the LogSentinel GUI."""
+
+from pathlib import Path
+
+
+# PyInstaller defines SPECPATH while evaluating a spec file. Resolve every
+# input from the project root, rather than relying on the caller's cwd.
+PROJECT_ROOT = Path(SPECPATH).resolve().parent
+SOURCE_ROOT = PROJECT_ROOT / "src"
+ENTRY_POINT = PROJECT_ROOT / "packaging" / "gui_entry.py"
+ASSET_ROOT = SOURCE_ROOT / "logsentinel" / "gui" / "assets"
+WINDOWS_ICON = ASSET_ROOT / "logsentinel.ico"
+
+if not ENTRY_POINT.is_file():
+    raise FileNotFoundError(f"GUI entry point not found: {ENTRY_POINT}")
+if not WINDOWS_ICON.is_file():
+    raise FileNotFoundError(f"Windows application icon not found: {WINDOWS_ICON}")
+
+# Keep paths relative to the package asset root so icons.py can find files at
+# logsentinel/gui/assets/{icons,brand} in both source and frozen execution.
+asset_files = sorted(
+    path for path in ASSET_ROOT.rglob("*")
+    if path.is_file() and path.suffix.lower() in {".svg", ".ico"}
+)
+svg_files = [path for path in asset_files if path.suffix.lower() == ".svg"]
+if len(svg_files) != 22:
+    raise RuntimeError(
+        f"Expected 22 GUI SVG assets under {ASSET_ROOT}, found {len(svg_files)}")
+
+asset_datas = [
+    (
+        str(path),
+        (Path("logsentinel") / "gui" / "assets"
+         / path.relative_to(ASSET_ROOT).parent).as_posix(),
+    )
+    for path in asset_files
+]
+
+analysis = Analysis(
+    [str(ENTRY_POINT)],
+    pathex=[str(SOURCE_ROOT)],
+    binaries=[],
+    datas=asset_datas,
+    hiddenimports=[],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+    optimize=0,
+)
+
+# Qt Virtual Keyboard is GPLv3-only and unused by LogSentinel. PyInstaller's
+# QtGui hook copies the whole "platforminputcontexts" plugin category, which
+# contains only qtvirtualkeyboardplugin.dll; binary dependency analysis then
+# pulls in Qt6VirtualKeyboard.dll and, through it, the QML/Quick/OpenGL stack.
+# LogSentinel imports none of them, ships no QML payload, and never selects the
+# virtual keyboard input method. PyInstaller 6.22.3 exposes no hooksconfig switch
+# for Qt plugin categories, so the entries are removed from the final TOCs here.
+# Only components whose *sole* importer is this stack are listed; every bundled
+# native module's import table was inspected to confirm that (Step 9.3.2).
+EXCLUDED_PLUGIN_CATEGORIES = ("plugins/platforminputcontexts/",)
+EXCLUDED_BINARIES = {
+    "pyside6/qt6virtualkeyboard.dll",
+    "pyside6/qt6qml.dll",
+    "pyside6/qt6quick.dll",
+    "pyside6/qt6qmlmeta.dll",
+    "pyside6/qt6qmlmodels.dll",
+    "pyside6/qt6qmlworkerscript.dll",
+    "pyside6/qt6opengl.dll",
+}
+
+
+def _is_excluded(dest, typecode):
+    normalized = str(dest).replace("\\", "/").lower()
+    if any(category in normalized for category in EXCLUDED_PLUGIN_CATEGORIES):
+        return True
+    return typecode in {"BINARY", "EXTENSION"} and normalized in EXCLUDED_BINARIES
+
+
+def _without_virtual_keyboard(entries):
+    kept = []
+    removed = []
+    for entry in entries:
+        dest, source, typecode = entry[0], entry[1], entry[2]
+        if _is_excluded(dest, typecode):
+            removed.append(dest)
+        else:
+            kept.append(entry)
+    return kept, removed
+
+
+remaining_binaries, removed_binaries = _without_virtual_keyboard(analysis.binaries)
+remaining_datas, removed_datas = _without_virtual_keyboard(analysis.datas)
+
+# The exclusion must actually take effect: 1 plugin + 7 Qt libraries are expected,
+# and nothing excluded may survive in the TOC that EXE receives.
+if len(removed_binaries) != len(EXCLUDED_BINARIES) + 1:
+    raise RuntimeError(
+        "Expected to exclude 8 Qt Virtual Keyboard components, removed "
+        f"{len(removed_binaries)}: {sorted(removed_binaries)}")
+for entry in remaining_binaries + remaining_datas:
+    if _is_excluded(entry[0], entry[2]):
+        raise RuntimeError(f"Excluded Qt Virtual Keyboard component survived: {entry[0]}")
+
+for dest in sorted(removed_binaries + removed_datas):
+    print(f"[LogSentinel] excluded Qt Virtual Keyboard component: {dest}")
+
+analysis.binaries = remaining_binaries
+analysis.datas = remaining_datas
+
+pyz = PYZ(analysis.pure)
+
+# Supplying scripts, binaries, and data directly to EXE creates a one-file
+# executable. PyInstaller's standard PySide6 hooks collect the Qt runtime and
+# platform/style plugins required by the imported Qt modules.
+exe = EXE(
+    pyz,
+    analysis.scripts,
+    analysis.binaries,
+    analysis.datas,
+    [],
+    name="LogSentinel-GUI",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=[str(WINDOWS_ICON)],
+)

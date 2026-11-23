@@ -4,8 +4,10 @@ Implements docs/ARCHITECTURE.md section 10 (AR-008) and docs/REQUIREMENTS.md
 FR-060/FR-061/FR-140/FR-141/FR-142:
 
 - ``DEFAULTS`` is the single source of truth for built-in values.
-- Precedence: built-in defaults < JSON configuration file < CLI overrides.
-- Only non-``None`` CLI override values replace lower-precedence values.
+- Precedence: built-in defaults < optional application defaults < JSON
+  configuration file < explicit overrides. The CLI supplies no application
+  defaults, so its behavior remains built-in < JSON < CLI overrides.
+- Only non-``None`` override values replace lower-precedence values.
 - Invalid configuration raises :class:`ConfigError` with a useful diagnostic;
   raw JSON-decoding and filesystem exceptions are never leaked (FR-150).
 
@@ -135,17 +137,21 @@ def _load_json_config(config_path: str | None) -> dict[str, object]:
     }
 
 
-def _validated_overrides(overrides: dict[str, object] | None) -> dict[str, object]:
-    """Validate CLI overrides; only non-None values are applied (AR-008)."""
+def _validated_overrides(
+    overrides: dict[str, object] | None,
+    *,
+    source: str = "CLI overrides",
+) -> dict[str, object]:
+    """Validate one override layer; only non-None values are applied (AR-008)."""
     if overrides is None:
         return {}
     if not isinstance(overrides, dict):
-        raise ConfigError("CLI overrides must be a mapping")
+        raise ConfigError(f"{source} must be a mapping")
     unknown = sorted(str(key) for key in overrides if key not in CONFIG_KEYS)
     if unknown:
-        raise ConfigError(f"unknown CLI override key(s): {', '.join(unknown)}")
+        raise ConfigError(f"unknown {source} key(s): {', '.join(unknown)}")
     return {
-        str(key): _validated_value(str(key), value, "CLI overrides")
+        str(key): _validated_value(str(key), value, source)
         for key, value in overrides.items()
         if value is not None
     }
@@ -154,15 +160,21 @@ def _validated_overrides(overrides: dict[str, object] | None) -> dict[str, objec
 def load_config(
     cli_overrides: dict[str, object] | None,
     config_path: str | None,
+    *,
+    defaults: dict[str, object] | None = None,
 ) -> AppConfig:
     """Build the effective configuration.
 
-    Precedence (AR-008): built-in defaults < JSON configuration file <
-    CLI overrides. Only non-``None`` CLI override values replace
-    lower-precedence values. Raises :class:`ConfigError` for any invalid
-    input (FR-061).
+    Precedence (AR-008): built-in defaults < persistent application
+    defaults < JSON configuration file < explicit overrides. The optional
+    ``defaults`` layer is used by the GUI Settings centre; the CLI never
+    passes it, so CLI precedence is unchanged. Only non-``None`` override
+    values replace lower-precedence values. Raises :class:`ConfigError` for
+    any invalid input (FR-061).
     """
     merged: dict[str, object] = dict(DEFAULTS)
+    merged.update(_validated_overrides(
+        defaults, source="application defaults"))
     merged.update(_load_json_config(config_path))
     merged.update(_validated_overrides(cli_overrides))
     return AppConfig(**{key: merged[key] for key in CONFIG_KEYS})
