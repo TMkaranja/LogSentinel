@@ -42,41 +42,42 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SAMPLES = PROJECT_ROOT / "samples"
 
 
-class WorkerCapture(QObject):
-    """Main-thread receiver that records worker signals."""
+if PYSIDE_AVAILABLE:
+    class WorkerCapture(QObject):
+        """Main-thread receiver that records worker signals."""
 
-    def __init__(self):
-        super().__init__()
-        self.started_count = 0
-        self.progress = []
-        self.results = []
-        self.cancelled_count = 0
-        self.failures = []
-        self.finished_count = 0
+        def __init__(self):
+            super().__init__()
+            self.started_count = 0
+            self.progress = []
+            self.results = []
+            self.cancelled_count = 0
+            self.failures = []
+            self.finished_count = 0
 
-    @Slot()
-    def on_started(self):
-        self.started_count += 1
+        @Slot()
+        def on_started(self):
+            self.started_count += 1
 
-    @Slot(object)
-    def on_progress(self, event):
-        self.progress.append(event)
+        @Slot(object)
+        def on_progress(self, event):
+            self.progress.append(event)
 
-    @Slot(object)
-    def on_completed(self, result):
-        self.results.append(result)
+        @Slot(object)
+        def on_completed(self, result):
+            self.results.append(result)
 
-    @Slot()
-    def on_cancelled(self):
-        self.cancelled_count += 1
+        @Slot()
+        def on_cancelled(self):
+            self.cancelled_count += 1
 
-    @Slot(str)
-    def on_failed(self, message):
-        self.failures.append(message)
+        @Slot(str)
+        def on_failed(self, message):
+            self.failures.append(message)
 
-    @Slot()
-    def on_finished(self):
-        self.finished_count += 1
+        @Slot()
+        def on_finished(self):
+            self.finished_count += 1
 
 
 class WorkerTestBase(unittest.TestCase):
