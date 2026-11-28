@@ -18,13 +18,16 @@ try:
         QApplication,
         QCheckBox,
         QListWidget,
+        QPushButton,
         QSpinBox,
     )
 
     from logsentinel.config import AppConfig, load_config
     from logsentinel.gui.app import create_application
+    from logsentinel.gui.icons import icon_pixmap
     from logsentinel.gui.main_window import MainWindow
     from logsentinel.gui.panels import ConfigPanel, InputPanel
+    from logsentinel.gui.theme import current_theme
 
     PYSIDE_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised only without PySide6
@@ -155,6 +158,60 @@ class TestInputSelection(PanelTestCase):
     def test_main_window_embeds_panels(self):
         self.assertIsInstance(self.window.input_panel, InputPanel)
         self.assertIsInstance(self.window.config_panel, ConfigPanel)
+
+    def test_icon_actions_keep_clear_reset_and_remove_semantics(self):
+        input_buttons = {
+            button.text(): button
+            for button in self.inputs.findChildren(QPushButton)
+        }
+        config_buttons = {
+            button.text(): button
+            for button in self.config.findChildren(QPushButton)
+        }
+        theme = current_theme()
+
+        for text, tooltip in (
+            ("Clear All", "Remove every selected input path"),
+        ):
+            button = input_buttons[text]
+            self.assertEqual(button.toolTip(), tooltip)
+            self.assertEqual(
+                button.icon().pixmap(16, 16).toImage(),
+                icon_pixmap("x", 16, theme.text_muted).toImage())
+
+        remove = input_buttons["Remove Selected"]
+        self.assertEqual(remove.toolTip(), "Remove the selected input paths")
+        self.assertEqual(
+            remove.icon().pixmap(16, 16).toImage(),
+            icon_pixmap("trash", 16, theme.text_muted).toImage())
+
+        folder_button = input_buttons["Add Folder"]
+        self.assertEqual(
+            folder_button.toolTip(),
+            "Add a directory for recursive log discovery")
+        browse_button = config_buttons["Browse"]
+        self.assertEqual(
+            browse_button.toolTip(),
+            "Validate and load a JSON configuration file")
+
+        clear_config = config_buttons["Clear"]
+        reset = config_buttons["Reset Overrides"]
+        for button, tooltip in (
+            (clear_config, "Return to built-in defaults"),
+            (reset, "Discard field edits and restore the loaded values"),
+        ):
+            self.assertEqual(button.toolTip(), tooltip)
+            self.assertEqual(
+                button.icon().pixmap(16, 16).toImage(),
+                icon_pixmap("x", 16, theme.text_muted).toImage())
+
+        apply = config_buttons["Apply"]
+        self.assertEqual(apply.toolTip(), "Validate the combined configuration")
+        self.assertEqual(
+            apply.icon().pixmap(16, 16).toImage(),
+            icon_pixmap("check", 16, theme.accent_text).toImage())
+        self.assertEqual(folder_button.text(), "Add Folder")
+        self.assertEqual(browse_button.text(), "Browse")
 
 
 class TestConfiguration(PanelTestCase):

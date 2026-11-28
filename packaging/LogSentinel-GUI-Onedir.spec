@@ -115,6 +115,70 @@ for entry in remaining_binaries + remaining_datas:
 for dest in sorted(removed_binaries + removed_datas):
     print(f"[LogSentinel] excluded Qt Virtual Keyboard component: {dest}")
 
+# QtGui's hook collects every imageformats plugin, including qpdf.dll; its
+# import then pulls in Qt6Pdf.dll. PyInstaller also adds opengl32sw.dll as an
+# optional Windows Qt binary. LogSentinel has no PDF or OpenGL/Qt Quick UI.
+# Keep this to exact destination paths: the rest of imageformats includes the
+# required ICO/SVG handlers. Mesa's software OpenGL fallback is intentionally
+# excluded; revisit this if future features use OpenGL, Qt Quick, or QRhi.
+EXCLUDED_UNUSED_QT_BINARIES = {
+    "pyside6/qt6pdf.dll",
+    "pyside6/plugins/imageformats/qpdf.dll",
+    "pyside6/opengl32sw.dll",
+}
+
+
+def _without_unused_qt_binaries(entries):
+    kept = []
+    removed = []
+    for entry in entries:
+        dest, source, typecode = entry[0], entry[1], entry[2]
+        normalized = str(dest).replace("\\", "/").lower()
+        if typecode == "BINARY" and normalized in EXCLUDED_UNUSED_QT_BINARIES:
+            removed.append(normalized)
+        else:
+            kept.append(entry)
+    return kept, removed
+
+
+remaining_binaries, removed_unused_qt = _without_unused_qt_binaries(remaining_binaries)
+if set(removed_unused_qt) != EXCLUDED_UNUSED_QT_BINARIES or len(removed_unused_qt) != 3:
+    raise RuntimeError(
+        "Expected to exclude exactly Qt6Pdf.dll, qpdf.dll, and opengl32sw.dll; "
+        f"removed {sorted(removed_unused_qt)}")
+for entry in remaining_binaries + remaining_datas:
+    normalized = str(entry[0]).replace("\\", "/").lower()
+    if entry[2] == "BINARY" and normalized in EXCLUDED_UNUSED_QT_BINARIES:
+        raise RuntimeError(f"Excluded unused Qt binary survived: {entry[0]}")
+
+# Guard the image handlers, Windows platform backends, and primary widgets stack
+# against accidental broadening of the exact-path filter above.
+REQUIRED_QT_DESTINATIONS = {
+    "pyside6/qt6core.dll",
+    "pyside6/qt6gui.dll",
+    "pyside6/qt6svg.dll",
+    "pyside6/qt6widgets.dll",
+    "pyside6/plugins/imageformats/qico.dll",
+    "pyside6/plugins/imageformats/qsvg.dll",
+    "pyside6/plugins/iconengines/qsvgicon.dll",
+    "pyside6/plugins/platforms/qwindows.dll",
+    "pyside6/plugins/platforms/qdirect2d.dll",
+    "pyside6/plugins/platforms/qminimal.dll",
+    "pyside6/plugins/platforms/qoffscreen.dll",
+    "pyside6/plugins/styles/qmodernwindowsstyle.dll",
+}
+remaining_destinations = {
+    str(entry[0]).replace("\\", "/").lower()
+    for entry in remaining_binaries
+}
+missing_required_qt = REQUIRED_QT_DESTINATIONS - remaining_destinations
+if missing_required_qt:
+    raise RuntimeError(
+        f"Required Qt binaries/plugins missing after exclusions: {sorted(missing_required_qt)}")
+
+for dest in sorted(removed_unused_qt):
+    print(f"[LogSentinel] excluded unused Qt binary: {dest}")
+
 analysis.binaries = remaining_binaries
 analysis.datas = remaining_datas
 

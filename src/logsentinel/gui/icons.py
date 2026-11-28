@@ -1,8 +1,8 @@
 """Local vector icon and brand-asset support for the LogSentinel GUI.
 
 The application ships SVG assets under ``gui/assets``. If a wheel/build omits
-those data files, the same Lucide-style path data is embedded here as a
-fallback so the interface never falls back to remote assets or emoji glyphs.
+those data files, matching local path data is embedded here as a fallback so
+the interface never falls back to remote assets or emoji glyphs.
 
 SVG placeholders are replaced at render time, which keeps every icon and
 brand mark consistent with the active theme without maintaining four copies
@@ -76,8 +76,11 @@ _ICON_PATHS: dict[str, str] = {
     "play": '<path d="m5 3 14 9-14 9V3Z"/>',
     "stop": '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
     "download": (
-        '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
-        '<path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>'
+        '<path d="M6.2 20.3V4.1c0-.6.5-1.1 1.1-1.1h6.4l4.8 4.8v12.5'
+        'c0 .6-.5 1.1-1.1 1.1H7.3c-.6 0-1.1-.5-1.1-1.1Z"/>'
+        '<path d="M13.6 3.2v4.9h4.8"/>'
+        '<path d="M12 9.4v6.7"/>'
+        '<path d="m9.5 13.6 2.5 2.6 2.5-2.6"/>'
     ),
     "file_plus": (
         '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12'
@@ -85,10 +88,11 @@ _ICON_PATHS: dict[str, str] = {
         '<path d="M12 12v6"/><path d="M9 15h6"/>'
     ),
     "folder_open": (
-        '<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 '
-        '1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5'
-        'a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 '
-        '1.67.9H18a2 2 0 0 1 2 2v2"/>'
+        '<path d="M3.2 7.2V5.8c0-.9.7-1.6 1.6-1.6h4l2 2.2h8.3'
+        'c.9 0 1.6.7 1.6 1.6v1.3"/>'
+        '<path d="m4 11.1 1.1 7.1c.1.9.9 1.5 1.8 1.5h11.3'
+        'c.8 0 1.5-.5 1.8-1.3l1.5-4.4c.3-.9-.3-1.8-1.2-1.8H9.2'
+        'c-.7 0-1.3.3-1.8.8L4 16"/>'
     ),
     "trash": (
         '<path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 '
@@ -119,13 +123,20 @@ _ICON_PATHS: dict[str, str] = {
         ' 0-.5-.2-1-.5-1.4-.3-.4-.5-.8-.5-1.3 0-1.1.9-2 2-2h1.5'
         'a4 4 0 0 0 4-4A10 10 0 0 0 12 2Z"/>'
     ),
-    "check": '<path d="M20 6 9 17l-5-5"/>',
+    "check": (
+        '<circle cx="12" cy="12" r="9"/>'
+        '<path d="m12 7.4 1.2 3.4 3.4 1.2-3.4 1.2-1.2 3.4-1.2-3.4-3.4-1.2 3.4-1.2Z"/>'
+    ),
     "alert": (
         '<path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14'
         'A2 2 0 0 0 4 22h16a2 2 0 0 0 1.7-4Z"/>'
         '<path d="M12 9v4"/><path d="M12 17h.01"/>'
     ),
-    "x": '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    "x": (
+        '<path d="m4.7 16.1 8.6-9.2 6.1 5.7-8.6 9.2a1.7 1.7 0 0 1-2.4.1l-3.6-3.4a1.7 1.7 0 0 1-.1-2.4Z"/>'
+        '<path d="m13.3 6.9 2-2.1a1.7 1.7 0 0 1 2.4-.1l3.6 3.4a1.7 1.7 0 0 1 .1 2.4l-2 2.1"/>'
+        '<path d="M5.9 21h13.4"/>'
+    ),
 }
 
 _ICON_HEADER = (

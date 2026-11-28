@@ -1,19 +1,31 @@
 # LogSentinel
 
-**A defensive, file-based log analysis CLI — offline triage for SSH, firewall, and
-web access logs.**
+**LogSentinel Phase 1** provides a defensive, file-based log analysis CLI and an
+optional PySide6 desktop GUI for offline review of SSH, firewall, and web access
+logs. A Windows onedir GUI candidate exists locally; it is not an installer or a
+claim of broad Windows support or production readiness, and it remains **HOLD —
+NOT CLEARED FOR DISTRIBUTION**.
 
-LogSentinel reads log files you supply, extracts structured security events, groups
-activity by source IP address, applies three configurable detection rules, and
-produces human-readable and machine-readable reports. It runs fully offline,
-performs no log acquisition, and makes no network connections.
+Both interfaces read log files you supply, extract structured security events,
+group activity by source IP address, apply three configurable detection rules,
+and produce reports. LogSentinel does not acquire logs from other systems. Findings
+are review leads for a human analyst, not assertions of malicious intent.
 
-**Findings are review leads for a human analyst — never assertions of malicious
-intent.** Legitimate tools (monitoring agents, vulnerability scanners, broken
-integrations) produce identical statistical signatures; every finding carries
-raw-line evidence so you can reach your own conclusion.
+For installation, first launch, the GUI pages, privacy limitations, and complete
+Phase 1 user instructions, see the [LogSentinel User Guide](docs/USER_GUIDE.md).
+For detailed CLI commands and configuration, see the
+[CLI Usage Guide](docs/USAGE.md).
 
-- Requires Python **3.12 or newer** · standard library only, zero runtime dependencies
+**Release licensing review:** the inspected Windows GUI candidate is **not cleared
+for distribution**. Third-party notice and distribution-status materials prepared for review are
+incomplete proposals, not final recipient notices or legal clearance.
+
+Legitimate monitoring tools, scanners, and broken integrations can produce the
+same patterns, so review findings in context rather than treating them as proof.
+
+- CLI requires Python **3.12 or newer** and has no third-party runtime
+  dependencies; the optional GUI source requires PySide6, which is not declared
+  in `pyproject.toml`.
 - Batch analysis of files · streaming pipeline · SQLite-staged with multiplicity-aware dedup
 - Console and JSON reports · deterministic output · atomic file writes
 
@@ -70,11 +82,12 @@ or strict-mode abort · `3` unexpected failure.
 
 ## Requirements & installation
 
-- Requires Python **3.12 or newer** (declared compatibility:
-  `requires-python = ">=3.12"`). Developed and locally tested on Windows using
-  CPython 3.14. The GitHub Actions workflow is configured for Ubuntu using
-  Python 3.14. macOS has not been tested. Pure Python and standard library
-  only — no shell-out, no third-party packages.
+- Requires Python **3.12 or newer** (`requires-python = ">=3.12"`). The CLI has
+  no third-party runtime dependencies. Local verification for this source state
+  used CPython 3.14.10 on Windows. The GitHub Actions workflow is configured for
+  Python 3.14 on both Ubuntu and Windows for pushes and pull requests; a hosted
+  run for the current source state is not claimed here. macOS has not been
+  validated.
 
 ```bash
 # from a checkout, without installing (Linux/macOS bash):
@@ -83,14 +96,20 @@ PYTHONPATH=src python -m logsentinel --help
 
 ```powershell
 # Windows PowerShell:
-$env:PYTHONPATH = "src"
+$env:PYTHONPATH = "$PWD\src"
 python -m logsentinel --help
 ```
 
 ```bash
-# or install the console script:
-pip install .
+# or install the CLI package and console script:
+python -m pip install .
 ```
+
+The CLI has no third-party runtime dependencies. Building/installing the project
+from `pyproject.toml` uses its declared `setuptools>=68` build requirement; this
+is separate from the installed CLI's runtime dependencies. The optional GUI
+source requires PySide6 in the Python environment and is not installed by
+`pip install .`.
 
 ## Quick start
 
@@ -159,28 +178,46 @@ The malformed line is recorded as a parse error entry in the report.
 python -m unittest discover
 ```
 
-354 tests (stdlib `unittest`, no external dependencies), including boundary
-conditions, a 105,000-line streaming scale test, and a traced-memory bound
-test. Verified locally on CPython 3.14 (Windows). The GitHub Actions workflow
-(`.github/workflows/tests.yml`) is **configured** to run this same suite on
-every push and pull request (Python 3.14, Ubuntu); no hosted CI run has been
-executed yet.
+The full standard-library `unittest` suite was run locally from the repository
+root with CPython 3.14.10 on Windows: **556 tests ran; 546 passed and 10 were
+skipped**. Focused GUI discovery ran **140 tests; all 140 passed**. The suite
+includes a 105,335-line end-to-end streaming test and a `tracemalloc` regression
+guard; the latter is not a general memory-usage guarantee. GitHub Actions
+(`.github/workflows/tests.yml`) is configured to run `python -m unittest discover`
+on pushes and pull requests using Python 3.14 on `ubuntu-latest` and
+`windows-latest`. These are local results, not hosted CI results; no matching
+hosted Actions run for the audited exact HEAD was found.
 
 ## Project structure
 
+The proposed source scope is CLI-plus-GUI and contains application code, tests,
+synthetic samples, and product/developer documentation. The GUI artwork remains
+on HOLD pending item-specific provenance and rights evidence; the GUI packaging
+recipes remain on HOLD pending review and separately authorized validation.
+Thus the complete GUI-inclusive source proposal is not ready to stage. Local
+virtual environments, `build/`, `dist/`, `release/`, and generated test/report
+outputs are not source-publication contents. The Windows executable and ZIP
+remain on distribution hold and are not approved as release assets.
+
 ```
 LogSentinel/
-├── src/logsentinel/     cli, config, inputs, parsers, events, detectors,
-│                        report, storage, exceptions (src layout)
-├── tests/               unittest suite, one file per module
-├── samples/             synthetic demo logs (RFC 5737 documentation addresses)
-├── docs/                ARCHITECTURE, DETECTION_RULES, PHASE3_VALIDATION,
-│                        REQUIREMENTS, USAGE
-├── .github/workflows/   CI workflow (tests.yml)
-└── pyproject.toml       packaging metadata (console script: logsentinel)
+├── src/logsentinel/          CLI and shared analysis code
+│   └── gui/                  optional PySide6 GUI source and assets
+├── tests/                    CLI, analysis, storage, and GUI tests
+├── samples/                  synthetic RFC 5737 demonstration logs
+├── docs/                     user guide, CLI/rule/architecture references,
+│                              requirements, historical validation, security audit
+├── packaging/                GUI PyInstaller recipes/entry point — HOLD pending review
+├── .github/workflows/        configured Ubuntu and Windows test jobs
+├── LICENSE                   LogSentinel project license
+├── PROJECTMAP.md             source and project map
+├── pyproject.toml            Python package metadata and CLI entry point
+└── .gitignore
 ```
 
-Design decisions and their rationale are documented in
+The Phase 1 product/developer documentation is listed below. Separate
+publication-review working records are not product documentation and do not
+grant publication or distribution approval. Design rationale is in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (AR-001…AR-012).
 
 ## Limitations & security considerations
@@ -208,13 +245,14 @@ Design decisions and their rationale are documented in
 
 ## Documentation
 
-Complete set under [`docs/`](docs/) (five files):
-
-- [`docs/USAGE.md`](docs/USAGE.md) — full usage guide, configuration, troubleshooting
-- [`docs/DETECTION_RULES.md`](docs/DETECTION_RULES.md) — rule specifications, false positives, edge cases
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design decisions (AR-001…AR-012)
-- [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) — functional/non-functional requirements
-- [`docs/PHASE3_VALIDATION.md`](docs/PHASE3_VALIDATION.md) — design-validation and remediation record, including the post-Phase-5 reconciliation (§16)
+- [`PROJECTMAP.md`](PROJECTMAP.md) — current CLI/GUI source map and publication/distribution hold boundaries
+- [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) — Phase 1 CLI and Windows GUI release-candidate guide, including workflows, troubleshooting, data handling, and limitations
+- [`docs/USAGE.md`](docs/USAGE.md) — CLI installation, commands, configuration, and report reference
+- [`docs/DETECTION_RULES.md`](docs/DETECTION_RULES.md) — implemented rule behavior, examples, false positives, and edge cases
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — architecture and design decisions
+- [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) — requirements specification
+- [`docs/PHASE3_VALIDATION.md`](docs/PHASE3_VALIDATION.md) — historical design-validation record, not current release approval
+- [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md) — security review record; it documents open, best-effort redaction limitations and is not a security guarantee
 
 ## License
 

@@ -1,9 +1,9 @@
 # LogSentinel — Architecture Specification
 
 - **Document:** ARCHITECTURE.md
-- **Phase:** 2 (Requirements & Technical Specification); implemented through Phase 5
-  (SQLite-backed streaming architecture)
-- **Status:** Implemented — this document reflects the shipped architecture
+- **Scope:** shared CLI analysis pipeline and the optional PySide6 GUI adapter
+- **History:** originally Phase 2; implementation evolved through Phase 5 (SQLite-backed streaming architecture)
+- **Status:** The core CLI architecture below reflects the current source. GUI source exists, but all 23 GUI artwork files and the three packaging paths remain publication HOLD; the Windows binary is not cleared for distribution.
 
 This document defines the system architecture of LogSentinel. Every design decision that
 could be interpreted in more than one way is recorded as a numbered decision (**AR-0xx**)
@@ -32,6 +32,30 @@ detection -> reporting
   in isolation and rules out circular imports by construction.
 - The process is a single streaming run: the CLI orchestrates the pipeline once, then
   exits with a code that encodes the outcome (REQUIREMENTS.md §14, FR-090).
+- The optional GUI is a separate PySide6 presentation layer under `src/logsentinel/gui/`.
+  It reuses the shared configuration, discovery, parser, storage, detector, event, and
+  report primitives; `gui/backend.py` adapts orchestration for structured results,
+  progress, and cancellation. The CLI does not import the GUI package. The GUI source
+  has 23 artwork resources whose provenance/rights are unresolved, so they remain HOLD
+  in the source-publication proposal; packaging recipes are also on review HOLD.
+
+### Optional GUI layer (source architecture)
+
+`gui/app.py` creates the Qt application and window. `gui/main_window.py` owns navigation,
+input/configuration panels, analysis/export worker lifecycles, and view coordination.
+`gui/backend.py` adapts the shared pipeline without reimplementing parsing or detection;
+`gui/worker.py` runs analysis on a Qt thread with cooperative cancellation. `models.py`,
+`panels.py`, `views.py`, `reports_view.py`, `settings_view.py`, `reporting.py`,
+`app_settings.py`, `theme.py`, `themes.py`, `icon_widgets.py`, and `icons.py` provide UI
+models, controls, dashboard/results, exports, preferences, theming, and icon/brand
+loading. `gui/__main__.py` is the module launch entry point. PySide6 is optional and is
+not declared by the CLI package metadata. `gui/assets/` contains the artwork files; all
+23 live SVG/ICO assets remain HOLD until item-specific source and rights evidence is
+reviewed. The GUI source is therefore not a complete publication-ready set today.
+
+### Verification and publication status snapshot
+
+For the audited worktree based on HEAD `3229b17f9f0ae4fefc48e58f7a688f9250e1a117`, the recorded local standard-library test result is 556 tests: 546 passed and 10 skipped; focused GUI discovery recorded 140 passed. No matching hosted GitHub Actions run for that exact HEAD was found. The workflow file configures Ubuntu and Windows jobs, but configuration and local results are not hosted CI evidence. Source publication remains NOT READY TO STAGE pending rights, scope, packaging, refs, scans, and owner decisions. Windows GUI binary distribution is a separate decision and remains HOLD — NOT CLEARED FOR DISTRIBUTION.
 
 ## 2. Component Diagram
 

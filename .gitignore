@@ -6,19 +6,24 @@ __pycache__/
 # Packaging / build artifacts
 *.egg-info/
 .eggs/
-build/
-dist/
+/build/
+/dist/
 
-# Virtual environments
-.venv/
-venv/
-env/
+# Virtual environments (repository-root environments)
+/.venv/
+/venv/
+/env/
+/.venv-build/
+/.venv-build-gui/
 
-# Generated reports and demonstration artifacts
-report.json
-report.txt
-report-explicit.json
-audit-*
+# Generated reports, test logs, and local release artifacts (repository root)
+/report.json
+/report.txt
+/report-explicit.json
+/audit-*
+/test-results.txt
+/test-results-local.txt
+/release/
 
 # OS cruft
 .DS_Store

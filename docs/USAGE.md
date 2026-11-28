@@ -1,8 +1,10 @@
-# LogSentinel — Usage Guide
+# LogSentinel — CLI Usage Reference
 
 - **Document:** USAGE.md
-- **Phase:** Documentation (reflects the verified implementation through Phase 5)
-- **Status:** Implemented — all commands below work against the current codebase.
+- **Phase:** Phase 1 user documentation (CLI reference)
+- **Status:** Commands below describe the current CLI; platform behavior depends on the installed Python environment.
+
+This document focuses on the command-line interface. For user-facing coverage of the Windows GUI, first launch, settings, report exports, data handling, and product limitations, see the [Phase 1 User Guide](USER_GUIDE.md).
 
 LogSentinel is a defensive, file-based log analysis CLI. Findings are review
 leads for a human analyst — not assertions of malicious intent.
@@ -10,15 +12,22 @@ leads for a human analyst — not assertions of malicious intent.
 ## 1. Prerequisites
 
 - **Python 3.12 or newer** (standard library only — no third-party packages
-  required at runtime). Development and CI target: Python 3.14.
+  required at runtime). Development target and configured GitHub Actions Python
+  version: 3.14.
 - Read access to the log files you want to analyse.
-- Windows, Linux, or macOS with a Python 3.12+ interpreter.
+- The CLI is implemented with cross-platform Python APIs. It has been locally
+  tested on Windows; GitHub Actions is configured for Python 3.14 on Ubuntu and
+  Windows, but this guide does not claim a hosted result for the current source
+  state. macOS and a complete operating-system support matrix are not
+  established here.
 
 ## 2. Installation
 
-Two supported paths, both dependency-free:
+The CLI has no third-party **runtime** dependencies. The package build declares
+`setuptools>=68` as a build requirement in `pyproject.toml`; an installer may
+need to make that build backend available. Two ways to run the CLI are:
 
-1. **From a checkout (no install):** from the project root, run the CLI via
+1. **From a checkout (no project install):** from the project root, run the CLI via
    the interpreter's module switch. Because the project uses a `src/`
    layout, add `src` to `PYTHONPATH` when the package is not installed:
 
@@ -27,16 +36,17 @@ Two supported paths, both dependency-free:
    PYTHONPATH=src python -m logsentinel --help
 
    # Windows (PowerShell):
-   $env:PYTHONPATH = "src"; python -m logsentinel --help
+   $env:PYTHONPATH = "$PWD\src"
+   python -m logsentinel --help
 
    # Windows (cmd.exe):
    set PYTHONPATH=src && python -m logsentinel --help
    ```
 
-2. **As a package (verified with the shipped `pyproject.toml`):**
+2. **Install the CLI package from the repository root:**
 
    ```bash
-   pip install .
+   python -m pip install .
    ```
 
    This installs the package into the environment and provides the

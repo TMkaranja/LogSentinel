@@ -8,6 +8,7 @@ Inter-first fallback stack, and page navigation never falls back to emoji.
 import os
 import re
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -22,6 +23,7 @@ try:
         brand_mark_pixmap,
         brand_pixmap,
         icon_pixmap,
+        icon_svg,
     )
     from logsentinel.gui.main_window import _PAGE_SPECS
     from logsentinel.gui.theme import (
@@ -99,10 +101,50 @@ class ThemeAssetRenderingTests(unittest.TestCase):
     def test_icons_render_in_every_theme(self):
         for key in THEME_KEYS:
             theme = THEMES[key]
-            for name in ("overview", "detections", "reports", "settings"):
+            for name in (
+                "overview", "detections", "reports", "settings",
+                "check", "download", "folder_open", "x",
+            ):
                 pixmap = icon_pixmap(name, 20, theme.text_muted)
                 self.assertFalse(pixmap.isNull(), f"{key}:{name}")
                 self.assertEqual(pixmap.size().width(), 20)
+
+    def test_approved_icon_assets_match_fallbacks_across_theme_roles_sizes(self):
+        from unittest.mock import patch
+
+        from logsentinel.gui import icons
+
+        names = ("check", "download", "folder_open", "x")
+        roles = ("text_muted", "text", "accent_text", "disabled_text")
+        sizes = (16, 20, 24, 32, 40)
+        missing = PROJECT_ROOT / "does-not-exist" / "assets"
+        try:
+            for name in names:
+                asset_svg = icon_svg(name, "#123456")
+                ET.fromstring(asset_svg)
+                self.assertNotIn("CURRENT_COLOR", asset_svg)
+                self.assertIn("#123456", asset_svg)
+
+                with patch.object(icons, "ASSET_ROOT", missing):
+                    fallback_svg = icon_svg(name, "#123456")
+                    ET.fromstring(fallback_svg)
+                    self.assertEqual(fallback_svg, asset_svg, name)
+
+                for theme in THEMES.values():
+                    for role in roles:
+                        color = getattr(theme, role)
+                        for size in sizes:
+                            icons.icon_pixmap.cache_clear()
+                            asset_image = icon_pixmap(name, size, color).toImage()
+                            self.assertFalse(asset_image.isNull())
+                            with patch.object(icons, "ASSET_ROOT", missing):
+                                icons.icon_pixmap.cache_clear()
+                                fallback_image = icon_pixmap(
+                                    name, size, color).toImage()
+                            self.assertEqual(asset_image, fallback_image,
+                                             f"{name}:{theme.key}:{role}:{size}")
+        finally:
+            icons.icon_pixmap.cache_clear()
 
     def test_brand_mark_and_wordmark_render(self):
         for key in THEME_KEYS:
